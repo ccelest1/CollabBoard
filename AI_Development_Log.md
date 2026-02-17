@@ -34,6 +34,7 @@
             - ignored frontend revision
             - did the other stuff
     * Sometimes performs revisions unnecessarily
+        - Can feel like a rollercoaster at points
 
 
 
@@ -45,3 +46,4 @@
         - You have to be aware of libraries and packages, possible technological conflicts, debt, etc.
         - There are steps that yo`u as a dev have to do such as cli commands
             * Understanding npm, json files, etc
+    * Can feel incredibly unsettling, to have building ongoing in so many files at auto

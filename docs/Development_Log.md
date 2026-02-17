@@ -24,3 +24,8 @@
 10. Following dictation
     * npm install -> npx playwright install -> npm run dev -> npm run test:e2e
 11. Able to get boards, but the board is very barebones + getting rate limited so i need to set up SMTP to avoid that service default
+    - SMTP using `resend.com`
+12. Ignored SMTP for time considerations
+13. Now on to core functionality
+    - Brought up error regarding the sign in flow (404 when pressing Open Demo Board)
+    - Starting on initial grid behavior
