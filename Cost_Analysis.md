@@ -14,10 +14,6 @@
     * Embeddings
     * Hosting [ Supabase ]
 
-
-
-
-
 ## Production Cost Projections
 | 100 Users | 1,000 Users | 10,000 Users | 1000,000 Users|
 |---- | ---- | ----- | ----|
