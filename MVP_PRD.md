@@ -17,14 +17,15 @@
 
 
 ## MVP Requirements
-- Infinite Board with pan/zoom
-- Sticky Notes with editable text
-- One shape type (rectangle, circle, or line)
-- Create, move, edit objects
-- Real-time sync between 2+ USERS
-- Multiplayer cursors with name labels
-- Presence awareness (who's online)
-- User authentication
+- Infinite Board with pan/zoom [x]
+- Sticky Notes with editable text [ ]
+- One shape type (rectangle, circle, or line) [ ]
+- Create, move, edit objects [ ]
+
+- Real-time sync between 2+ USERS [ ]
+- Multiplayer cursors with name labels [ ]
+- Presence awareness (who's online) [ ]
+- User authentication [x] - need to fix full pathing
 - Deployed and public accessible
 
 ### Build Strategy

@@ -1,12 +1,13 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { Navbar } from "@/components/Navbar";
 import { GridBackground } from "@/components/GridBackground";
+import { Navbar } from "@/components/Navbar";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const isBoardRoute = pathname?.startsWith("/board/");
+  const backgroundMode = pathname === "/" ? "home" : pathname?.startsWith("/dashboard") ? "dashboard" : "default";
 
   if (isBoardRoute) {
     return <main className="min-h-screen">{children}</main>;
@@ -14,7 +15,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <>
-      <GridBackground />
+      <GridBackground mode={backgroundMode} />
       <Navbar />
       <main className="container mx-auto px-4 py-6">{children}</main>
     </>

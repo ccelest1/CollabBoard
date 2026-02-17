@@ -2,32 +2,48 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import type { User } from "@supabase/supabase-js";
+import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-import { SignOutButton } from "./SignOutButton";
 import { ThemeToggle } from "./ThemeToggle";
 
+type AuthUser = {
+  email?: string | null;
+};
+
 export function Navbar() {
-  const [user, setUser] = useState<User | null>(null);
+  const router = useRouter();
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [authResolved, setAuthResolved] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
 
   useEffect(() => {
     const supabase = createClient();
 
     supabase.auth.getUser().then(({ data }) => {
       setUser(data.user ?? null);
+      setAuthResolved(true);
     });
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async () => {
-      const { data } = await supabase.auth.getUser();
-      setUser(data.user ?? null);
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      setAuthResolved(true);
     });
 
     return () => {
       subscription.unsubscribe();
     };
   }, []);
+
+  const handleSignOut = async () => {
+    setSigningOut(true);
+    const supabase = createClient();
+    await supabase.auth.signOut();
+    router.replace("/");
+    router.refresh();
+    setSigningOut(false);
+  };
 
   return (
     <nav className="pt-3">
@@ -42,7 +58,7 @@ export function Navbar() {
 
           <div className="flex items-center gap-4">
             <ThemeToggle />
-            {user ? (
+            {authResolved && user ? (
               <>
                 <Link
                   href="/dashboard"
@@ -51,15 +67,24 @@ export function Navbar() {
                   Dashboard
                 </Link>
                 <span className="text-sm text-slate-600">{user.email}</span>
-                <SignOutButton />
+                <button
+                  type="button"
+                  onClick={handleSignOut}
+                  disabled={signingOut}
+                  className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {signingOut ? "Signing out..." : "Sign out"}
+                </button>
               </>
-            ) : (
+            ) : authResolved ? (
               <Link
-                href="/login"
+                href="/"
                 className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
               >
                 Sign in
               </Link>
+            ) : (
+              <span className="text-sm text-slate-500">Loading...</span>
             )}
           </div>
         </div>
