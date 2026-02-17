@@ -29,3 +29,5 @@
 13. Now on to core functionality
     - Brought up error regarding the sign in flow (404 when pressing Open Demo Board)
     - Starting on initial grid behavior
+14. Working on grid ui + adding sign up/sign in with google additionally
+    * 
