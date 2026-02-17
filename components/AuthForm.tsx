@@ -77,7 +77,7 @@ export function AuthForm() {
     setStatus("loading");
     setMessage("");
     const supabase = createClient();
-    const redirectTo = `${window.location.origin}/auth/callback?next=/dashboard`;
+    const redirectTo = `${window.location.origin}/auth/callback?next=/dashboard&popup=1`;
 
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: "google",
@@ -122,6 +122,17 @@ export function AuthForm() {
       window.clearInterval(authPollRef.current);
     }
 
+    const messageHandler = (event: MessageEvent<{ source?: string; ok?: boolean }>) => {
+      if (event.origin !== window.location.origin) return;
+      if (event.data?.source !== "supabase-oauth") return;
+
+      if (event.data.ok === false) {
+        setStatus("error");
+        setMessage("Google auth did not complete.");
+      }
+    };
+    window.addEventListener("message", messageHandler);
+
     setMessage("Complete Google auth in the popup.");
     authPollRef.current = window.setInterval(async () => {
       const [{ data: sessionData }, popupClosed] = await Promise.all([
@@ -134,6 +145,7 @@ export function AuthForm() {
           window.clearInterval(authPollRef.current);
           authPollRef.current = null;
         }
+        window.removeEventListener("message", messageHandler);
         setStatus("success");
         setMessage("Signed in with Google.");
         window.location.href = "/dashboard";
@@ -145,6 +157,7 @@ export function AuthForm() {
           window.clearInterval(authPollRef.current);
           authPollRef.current = null;
         }
+        window.removeEventListener("message", messageHandler);
         setStatus("idle");
         setMessage("");
       }

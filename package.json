@@ -7,9 +7,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test:perf": "npm run test:perf:fps && npm run test:perf:ws",
-    "test:perf:fps": "playwright test --config=playwright.perf.config.ts",
-    "test:perf:ws": "node scripts/perf/ws-latency.mjs"
+    "test:e2e": "playwright test",
+    "test:e2e:routes": "playwright test e2e/routes",
+    "test:e2e:perf": "playwright test e2e/perf",
+    "test:perf": "npm run test:e2e:perf"
   },
   "dependencies": {
     "@supabase/ssr": "^0.8.0",
@@ -24,6 +25,7 @@
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",
+    "@types/three": "^0.179.0",
     "@playwright/test": "^1.55.0",
     "autoprefixer": "^10.4.20",
     "eslint": "^8",

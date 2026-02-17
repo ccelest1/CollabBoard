@@ -19,7 +19,7 @@ export default async function BoardPage({ params }: { params: { id: string } }) 
 
   return (
     <div className="h-[100dvh] w-screen overflow-hidden bg-white">
-      <BoardWorkspace boardId={params.id} userLabel={username ?? user.email ?? "User"} />
+      <BoardWorkspace boardId={params.id} userLabel={username ?? user.email ?? "User"} userId={user.id} />
     </div>
   );
 }

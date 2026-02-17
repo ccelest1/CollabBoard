@@ -3,10 +3,12 @@
 import { useEffect, useRef, useState, type PointerEvent, type WheelEvent } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import { markBoardVisited } from "@/lib/boards/store";
 
 type BoardWorkspaceProps = {
   boardId: string;
   userLabel: string;
+  userId: string;
 };
 
 type ToolId = "hand" | "cursor" | "sticky" | "rectangle" | "circle" | "line";
@@ -24,7 +26,7 @@ const MIN_SCREEN_DOT_SPACING = 14;
 
 const TOOLBAR_ITEMS: Array<{ id: ToolId; icon: string; description: string }> = [
   { id: "hand", icon: "✋", description: "Hand (drag board)" },
-  { id: "cursor", icon: "↖", description: "Cursor (select objects)" },
+  { id: "cursor", icon: "", description: "Cursor (select objects)" },
   { id: "sticky", icon: "🗒️", description: "Sticky note" },
   { id: "rectangle", icon: "▭", description: "Rectangle" },
   { id: "circle", icon: "◯", description: "Circle" },
@@ -42,7 +44,7 @@ function colorFromSeed(seed: string) {
   return `hsl(${hue} 70% 55%)`;
 }
 
-export function BoardWorkspace({ boardId, userLabel }: BoardWorkspaceProps) {
+export function BoardWorkspace({ boardId, userLabel, userId }: BoardWorkspaceProps) {
   const router = useRouter();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const contextRef = useRef<CanvasRenderingContext2D | null>(null);
@@ -141,6 +143,10 @@ export function BoardWorkspace({ boardId, userLabel }: BoardWorkspaceProps) {
     viewportRef.current = viewport;
     drawBoard(viewport);
   }, [viewport]);
+
+  useEffect(() => {
+    markBoardVisited(boardId, userId);
+  }, [boardId, userId]);
 
   const zoomAtScreenPoint = (screenX: number, screenY: number, zoomFactor: number) => {
     setViewport((current) => {
@@ -329,7 +335,18 @@ export function BoardWorkspace({ boardId, userLabel }: BoardWorkspaceProps) {
                     : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"
                   }`}
               >
-                <span>{item.icon}</span>
+                {item.id === "cursor" ? (
+                  <svg viewBox="0 0 24 24" className="h-6 w-6" aria-hidden="true">
+                    <path
+                      d="M4 2L19 12L12 13L14.5 21L10.5 22L8 14L4 18V2Z"
+                      fill="currentColor"
+                      stroke="currentColor"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                ) : (
+                  <span>{item.icon}</span>
+                )}
                 <span className="pointer-events-none absolute -top-10 left-1/2 -translate-x-1/2 rounded-md bg-slate-900 px-2 py-1 text-xs text-white opacity-0 transition group-hover:opacity-100">
                   {item.description}
                 </span>
