@@ -1,0 +1,24 @@
+---
+description: Supabase auth and SSR patterns for Next.js App Router
+globs: "**/*.{ts,tsx}"
+alwaysApply: false
+---
+
+# Supabase SSR for Next.js App Router
+
+Use `@supabase/ssr` for Next.js App Router. Reference: https://supabase.com/docs/guides/auth/server-side/nextjs
+
+## Client usage
+
+- **Browser (Client Components)**: Use `createClient()` from `@/lib/supabase/client` (uses `createBrowserClient`)
+- **Server (Server Components, Route Handlers, Server Actions)**: Use `createClient()` from `@/lib/supabase/server` (uses `createServerClient` with cookies)
+
+## Auth protection
+
+- Always use `supabase.auth.getClaims()` to protect pages and user data — never trust `getSession()` in server code
+- `getSession()` does not revalidate the JWT; `getClaims()` validates the signature against project public keys
+
+## Middleware
+
+- Middleware refreshes auth tokens via `updateSession` in `@/lib/supabase/proxy`
+- Return the `supabaseResponse` object from middleware — do not create a new response without copying cookies
