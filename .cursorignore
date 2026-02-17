@@ -1,0 +1,53 @@
+# ===========================================
+# .cursorignore - Excludes files from Cursor's
+# indexing and AI context (similar to .gitignore)
+# ===========================================
+
+# Dependencies
+node_modules/
+vendor/
+bower_components/
+.pnp/
+.pnp.js
+
+# Build outputs
+dist/
+build/
+out/
+.next/
+.nuxt/
+*.min.js
+*.min.css
+
+# Logs & temp files
+*.log
+*.tmp
+*.temp
+.DS_Store
+
+# Environment & secrets (never index these)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# IDE / editor configs (optional - include if you don't want AI to read them)
+# .vscode/
+# .idea/
+
+# Large / generated data
+*.db
+*.sqlite
+*.sqlite3
+*.csv
+
+# Documentation (optional - exclude if docs are large or not relevant)
+# docs/
+# *.md
+
+# Lock files (optional - can be large and noisy)
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
