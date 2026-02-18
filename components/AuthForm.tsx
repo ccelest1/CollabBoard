@@ -1,11 +1,14 @@
 "use client";
 
 import { createClient } from "@/lib/supabase/client";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 type Mode = "sign-in" | "sign-up";
 
 export function AuthForm() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [mode, setMode] = useState<Mode>("sign-in");
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
@@ -15,6 +18,11 @@ export function AuthForm() {
   const authPollRef = useRef<number | null>(null);
 
   const isLoading = status === "loading";
+  const redirectPathRaw = searchParams.get("redirect");
+  const redirectPath =
+    redirectPathRaw && redirectPathRaw.startsWith("/") && !redirectPathRaw.startsWith("//")
+      ? redirectPathRaw
+      : "/dashboard";
 
   useEffect(() => {
     return () => {
@@ -39,7 +47,7 @@ export function AuthForm() {
         return;
       }
 
-      const { error } = await supabase.auth.signUp({
+      const { data, error } = await supabase.auth.signUp({
         email,
         password,
         options: {
@@ -56,8 +64,16 @@ export function AuthForm() {
         return;
       }
 
+      if (data.session) {
+        setStatus("success");
+        setMessage("Signing you in...");
+        router.replace(redirectPath);
+        router.refresh();
+        return;
+      }
+
       setStatus("success");
-      setMessage("Account created. Check email to confirm, then sign in.");
+      setMessage("Account created. Check your email to confirm, then sign in.");
       return;
     }
 
@@ -70,14 +86,15 @@ export function AuthForm() {
 
     setStatus("success");
     setMessage("Signing you in...");
-    window.location.href = "/dashboard";
+    router.replace(redirectPath);
+    router.refresh();
   }
 
   async function handleGoogleAuth(intent: Mode) {
     setStatus("loading");
     setMessage("");
     const supabase = createClient();
-    const redirectTo = `${window.location.origin}/auth/callback?next=/dashboard&popup=1`;
+    const redirectTo = `${window.location.origin}/auth/callback?next=${encodeURIComponent(redirectPath)}&popup=1`;
 
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: "google",
@@ -148,7 +165,8 @@ export function AuthForm() {
         window.removeEventListener("message", messageHandler);
         setStatus("success");
         setMessage("Signed in with Google.");
-        window.location.href = "/dashboard";
+        router.replace(redirectPath);
+        router.refresh();
         return;
       }
 
