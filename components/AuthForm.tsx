@@ -1,13 +1,12 @@
 "use client";
 
 import { createClient } from "@/lib/supabase/client";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 type Mode = "sign-in" | "sign-up";
 
 export function AuthForm() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const [mode, setMode] = useState<Mode>("sign-in");
   const [username, setUsername] = useState("");
@@ -23,6 +22,9 @@ export function AuthForm() {
     redirectPathRaw && redirectPathRaw.startsWith("/") && !redirectPathRaw.startsWith("//")
       ? redirectPathRaw
       : "/dashboard";
+  const navigateNow = (path: string) => {
+    window.location.assign(path);
+  };
 
   useEffect(() => {
     return () => {
@@ -67,8 +69,7 @@ export function AuthForm() {
       if (data.session) {
         setStatus("success");
         setMessage("Signing you in...");
-        router.replace(redirectPath);
-        router.refresh();
+        navigateNow(redirectPath);
         return;
       }
 
@@ -86,8 +87,7 @@ export function AuthForm() {
 
     setStatus("success");
     setMessage("Signing you in...");
-    router.replace(redirectPath);
-    router.refresh();
+    navigateNow(redirectPath);
   }
 
   async function handleGoogleAuth(intent: Mode) {
@@ -143,6 +143,18 @@ export function AuthForm() {
       if (event.origin !== window.location.origin) return;
       if (event.data?.source !== "supabase-oauth") return;
 
+      if (event.data.ok === true) {
+        if (authPollRef.current) {
+          window.clearInterval(authPollRef.current);
+          authPollRef.current = null;
+        }
+        window.removeEventListener("message", messageHandler);
+        setStatus("success");
+        setMessage("Signed in with Google.");
+        navigateNow(redirectPath);
+        return;
+      }
+
       if (event.data.ok === false) {
         setStatus("error");
         setMessage("Google auth did not complete.");
@@ -165,8 +177,7 @@ export function AuthForm() {
         window.removeEventListener("message", messageHandler);
         setStatus("success");
         setMessage("Signed in with Google.");
-        router.replace(redirectPath);
-        router.refresh();
+        navigateNow(redirectPath);
         return;
       }
 

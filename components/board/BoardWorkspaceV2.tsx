@@ -253,6 +253,8 @@ function clampTextFontSize(value: number) {
 export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceProps) {
   const router = useRouter();
   const supabase = useMemo(() => createClient(), []);
+  const isBoardverse = boardId.toUpperCase() === "BOARDVERSE";
+  const defaultBoardName = isBoardverse ? "BOARDVERSE" : "Untitled Board";
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const contextRef = useRef<CanvasRenderingContext2D | null>(null);
   const sizeRef = useRef({ width: 0, height: 0, pixelRatio: 1 });
@@ -278,7 +280,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
   const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>([]);
   const [lastRemoteCursorLatencyMs, setLastRemoteCursorLatencyMs] = useState<number | null>(null);
   const [lastRemoteObjectLatencyMs, setLastRemoteObjectLatencyMs] = useState<number | null>(null);
-  const [boardName, setBoardName] = useState("");
+  const [boardName, setBoardName] = useState(isBoardverse ? "BOARDVERSE" : "");
   const [marqueeSelection, setMarqueeSelection] = useState<MarqueeSelection | null>(null);
   const [inlineTextEdit, setInlineTextEdit] = useState<{ id: string; value: string } | null>(null);
   const [connectDraft, setConnectDraft] = useState<ConnectSnapshot | null>(null);
@@ -316,7 +318,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
   const boardStateRef = useRef<BoardStateNormalized>(INITIAL_BOARD_STATE);
   const selectedIdsRef = useRef<string[]>([]);
   const remoteCursorsRef = useRef<Record<string, RemoteCursor>>({});
-  const boardNameRef = useRef("Untitled Board");
+  const boardNameRef = useRef(defaultBoardName);
   const activeToolRef = useRef<ToolId>("cursor");
   const lastSnapshotAppliedAtRef = useRef(0);
   const lastCursorWorldRef = useRef<WorldPoint>({ x: 0, y: 0 });
@@ -541,7 +543,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
     boardStateRef.current = boardState;
     selectedIdsRef.current = selectedObjectIds;
     remoteCursorsRef.current = remoteCursors;
-    boardNameRef.current = boardName || "Untitled Board";
+    boardNameRef.current = boardName || defaultBoardName;
     activeToolRef.current = activeTool;
     drawBoard(viewport, boardState, selectedObjectIds, remoteCursors);
   }, [viewport, boardState, selectedObjectIds, remoteCursors, boardName, activeTool]);
@@ -606,7 +608,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
       const entry = getBoards(userId).find((board) => board.id === cleanId);
       const fromBoards = entry?.name?.trim() || "";
       const fromCatalog = readBoardNameFromCatalog(cleanId);
-      const nextName = fromBoards || fromCatalog || boardNameRef.current || "Untitled Board";
+      const nextName = fromBoards || fromCatalog || boardNameRef.current || defaultBoardName;
       setBoardName(nextName);
       if (fromBoards || fromCatalog) {
         schedulePersistence(boardStateRef.current, nextName);
@@ -700,7 +702,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
         }
         return merged;
       });
-      if (event.boardName?.trim() && boardNameRef.current === "Untitled Board") {
+      if (event.boardName?.trim() && boardNameRef.current === defaultBoardName) {
         setBoardName(event.boardName.trim());
       }
       return;
@@ -738,7 +740,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
           receivedAt: now,
         },
       }));
-      if (event.boardName && boardNameRef.current === "Untitled Board") {
+      if (event.boardName && boardNameRef.current === defaultBoardName) {
         setBoardName(event.boardName);
         schedulePersistence(boardStateRef.current, event.boardName);
       }
@@ -802,7 +804,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
           lastActiveAt: newest.sentAt,
         };
         setLastRemoteCursorLatencyMs(Math.max(0, now - newest.sentAt));
-        if (newest.boardName && boardNameRef.current === "Untitled Board") {
+        if (newest.boardName && boardNameRef.current === defaultBoardName) {
           setBoardName(newest.boardName);
           schedulePersistence(boardStateRef.current, newest.boardName);
         }
@@ -2157,8 +2159,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
     setSigningOut(true);
     const client = createClient();
     await client.auth.signOut();
-    router.replace("/");
-    router.refresh();
+    window.location.replace("/login");
     setSigningOut(false);
   };
 
@@ -2202,6 +2203,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
   const displayedCollaborators = allCollaboratorsForDisplay.slice(0, 3);
   const overflowCollaboratorCount = Math.max(0, allCollaboratorsForDisplay.length - displayedCollaborators.length);
   const totalOnlineCount = allCollaboratorsForDisplay.length;
+  const displayBoardName = (boardName || "").trim() || defaultBoardName;
   const dedupedRemoteCursors = Array.from(
     Object.values(remoteCursors).reduce((acc, cursor) => {
       // Keep only the newest cursor for each remote user to avoid duplicate cursor ghosts.
@@ -2622,7 +2624,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
         <div className="flex items-center gap-4 text-sm">
           <span className="font-medium">CollabBoard</span>
           <span className="text-slate-400">|</span>
-          <span>{boardName || "Untitled Board"}</span>
+          <span>{displayBoardName}</span>
           <button type="button" className="rounded-md border border-slate-400 px-3 py-1 text-xs hover:bg-slate-50">
             Options
           </button>
@@ -2648,40 +2650,44 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
       </div>
 
       <div className="absolute left-5 top-24 w-44 rounded-xl border border-slate-400 bg-white px-3 py-3 shadow-sm">
-        <p className="text-sm">Board Id:</p>
-        <div className="mt-1 flex items-center justify-between gap-2">
-          <div className="flex min-w-0 items-center gap-1.5">
-            <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0 text-slate-600" aria-hidden="true">
-              <path
-                d="M9 15L6.5 17.5C4.6 19.4 4.6 22.4 6.5 24.3C8.4 26.2 11.4 26.2 13.3 24.3L17 20.6C18.9 18.7 18.9 15.7 17 13.8C16.5 13.3 15.9 13 15.3 12.8"
-                transform="translate(0 -3) scale(0.9)"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-              <path
-                d="M15 9L17.5 6.5C19.4 4.6 22.4 4.6 24.3 6.5C26.2 8.4 26.2 11.4 24.3 13.3L20.6 17C18.7 18.9 15.7 18.9 13.8 17C13.3 16.5 13 15.9 12.8 15.3"
-                transform="translate(-3 0) scale(0.9)"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-            <p className="truncate text-xs text-slate-500">{boardId}</p>
-          </div>
-          <button
-            type="button"
-            onClick={copyBoardId}
-            className="shrink-0 rounded border border-slate-300 px-1.5 py-0.5 text-[10px] text-slate-700 hover:bg-slate-50"
-          >
-            Copy
-          </button>
-        </div>
-        <p className="mt-3 text-sm">Zoom:</p>
+        {!isBoardverse ? (
+          <>
+            <p className="text-sm">Board Id:</p>
+            <div className="mt-1 flex items-center justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-1.5">
+                <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0 text-slate-600" aria-hidden="true">
+                  <path
+                    d="M9 15L6.5 17.5C4.6 19.4 4.6 22.4 6.5 24.3C8.4 26.2 11.4 26.2 13.3 24.3L17 20.6C18.9 18.7 18.9 15.7 17 13.8C16.5 13.3 15.9 13 15.3 12.8"
+                    transform="translate(0 -3) scale(0.9)"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d="M15 9L17.5 6.5C19.4 4.6 22.4 4.6 24.3 6.5C26.2 8.4 26.2 11.4 24.3 13.3L20.6 17C18.7 18.9 15.7 18.9 13.8 17C13.3 16.5 13 15.9 12.8 15.3"
+                    transform="translate(-3 0) scale(0.9)"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+                <p className="truncate text-xs text-slate-500">{boardId}</p>
+              </div>
+              <button
+                type="button"
+                onClick={copyBoardId}
+                className="shrink-0 rounded border border-slate-300 px-1.5 py-0.5 text-[10px] text-slate-700 hover:bg-slate-50"
+              >
+                Copy
+              </button>
+            </div>
+          </>
+        ) : null}
+        <p className={`${!isBoardverse ? "mt-3" : ""} text-sm`}>Zoom:</p>
         <p className="mt-1 text-xs text-slate-500">{Math.round(viewport.zoom * 100)}%</p>
         <div className="mt-4 flex items-center justify-between">
           <div>
