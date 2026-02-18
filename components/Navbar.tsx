@@ -2,19 +2,24 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { ThemeToggle } from "./ThemeToggle";
 
 type AuthUser = {
   email?: string | null;
+  user_metadata?: {
+    username?: string | null;
+  } | null;
 };
 
 export function Navbar() {
-  const router = useRouter();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [authResolved, setAuthResolved] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
+  const displayName =
+    typeof user?.user_metadata?.username === "string" && user.user_metadata.username.trim().length > 0
+      ? user.user_metadata.username.trim()
+      : user?.email?.split("@")[0] ?? "User";
 
   useEffect(() => {
     const supabase = createClient();
@@ -61,8 +66,7 @@ export function Navbar() {
     setSigningOut(true);
     const supabase = createClient();
     await supabase.auth.signOut();
-    router.replace("/");
-    router.refresh();
+    window.location.replace("/login");
     setSigningOut(false);
   };
 
@@ -87,7 +91,13 @@ export function Navbar() {
                 >
                   Dashboard
                 </Link>
-                <span className="text-sm text-slate-600">{user.email}</span>
+                <Link
+                  href="/boardverse"
+                  className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+                >
+                  Boardverse
+                </Link>
+                <span className="text-sm text-slate-600">{`Welcome, ${displayName}`}</span>
                 <button
                   type="button"
                   onClick={handleSignOut}

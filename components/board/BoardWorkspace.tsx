@@ -356,8 +356,7 @@ export function BoardWorkspace({ boardId, userLabel, userId }: BoardWorkspacePro
     setSigningOut(true);
     const supabase = createClient();
     await supabase.auth.signOut();
-    router.replace("/");
-    router.refresh();
+    window.location.replace("/login");
     setSigningOut(false);
   };
 
