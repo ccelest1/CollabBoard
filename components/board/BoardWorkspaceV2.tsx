@@ -2095,7 +2095,19 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
       if (target && source && target.id !== source.id) {
         const toAnchor = nearestAnchor(target, point);
         const targetPoint = connectorPoint(target, toAnchor);
-        createConnectorLine(source.id, connectRef.current.fromPoint, targetPoint);
+        createConnectorLine(
+          {
+            point: connectRef.current.fromPoint,
+            objectId: source.id,
+            anchor: connectRef.current.anchor,
+          },
+          {
+            point: targetPoint,
+            objectId: target.id,
+            anchor: toAnchor,
+          },
+          lineType ?? "arrow",
+        );
       }
       connectRef.current = null;
       setConnectDraft(null);
