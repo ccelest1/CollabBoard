@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { createClient } from "@/lib/supabase/client";
 import {
   createOwnedBoard,
   deleteOwnedBoard,
@@ -11,6 +12,7 @@ import {
   sanitizeBoardId,
   type BoardRecord,
 } from "@/lib/boards/store";
+import { savePersistedBoardSnapshot } from "@/lib/supabase/boardStateStore";
 
 type ViewMode = "grid" | "table";
 type DashboardClientProps = {
@@ -23,6 +25,7 @@ function formatDate(timestamp: number) {
 
 export function DashboardClient({ userId }: DashboardClientProps) {
   const router = useRouter();
+  const supabase = useMemo(() => createClient(), []);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [boardName, setBoardName] = useState("");
   const [joinBoardId, setJoinBoardId] = useState("");
@@ -31,8 +34,38 @@ export function DashboardClient({ userId }: DashboardClientProps) {
   const [version, setVersion] = useState(0);
   const [editing, setEditing] = useState<BoardRecord | null>(null);
   const [editingName, setEditingName] = useState("");
+  const [joinError, setJoinError] = useState("");
 
   const userScope = userId;
+
+  useEffect(() => {
+    let active = true;
+
+    const verifySession = async () => {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (!active) return;
+      if (!session) {
+        router.replace("/login?redirect=/dashboard");
+      }
+    };
+
+    void verifySession();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === "SIGNED_OUT" || !session) {
+        router.replace("/login?redirect=/dashboard");
+      }
+    });
+
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, [router, supabase]);
 
   useEffect(() => {
     if (!userScope) return;
@@ -81,18 +114,24 @@ export function DashboardClient({ userId }: DashboardClientProps) {
     [boards],
   );
 
-  const handleCreateBoard = () => {
+  const handleCreateBoard = async () => {
     if (!userScope) return;
     const id = createOwnedBoard(userScope, boardName);
+    const normalizedName = boardName.trim();
+    await savePersistedBoardSnapshot(supabase, id, {
+      objects: [],
+      boardName: normalizedName || "Untitled Board",
+    });
     setBoardName("");
     setVersion((current) => current + 1);
     router.push(`/board/${id}`);
   };
 
-  const handleJoinBoard = (event: FormEvent<HTMLFormElement>) => {
+  const handleJoinBoard = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const id = sanitizeBoardId(joinBoardId);
     if (!id) return;
+    setJoinError("");
     setJoinBoardId("");
     router.push(`/board/${id}`);
   };
@@ -242,7 +281,7 @@ export function DashboardClient({ userId }: DashboardClientProps) {
   return (
     <div className="mx-auto w-full max-w-6xl min-h-[calc(100vh-11rem)] rounded-xl border border-slate-300/70 bg-white/60 px-6 py-6 shadow-sm backdrop-blur-md md:px-7 md:py-8">
       <div className="relative min-h-[132px] md:min-h-[120px]">
-        <h1 className="text-center text-4xl font-semibold text-slate-900">Board Dashboard</h1>
+        <h1 className="text-center text-4xl font-semibold text-slate-900"> Dashboard</h1>
         <div className="absolute right-0 top-2 rounded-lg border border-slate-300 bg-white/90 p-3 shadow-sm">
           <div className="rounded-lg border border-slate-200 p-2">
             <p className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">View mode</p>
@@ -297,6 +336,7 @@ export function DashboardClient({ userId }: DashboardClientProps) {
             >
               Join Board
             </button>
+            {joinError ? <p className="mt-2 text-center text-xs text-red-600">{joinError}</p> : null}
           </form>
         </div>
 

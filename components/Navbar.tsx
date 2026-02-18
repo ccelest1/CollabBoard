@@ -18,20 +18,41 @@ export function Navbar() {
 
   useEffect(() => {
     const supabase = createClient();
+    let cancelled = false;
 
-    supabase.auth.getUser().then(({ data }) => {
-      setUser(data.user ?? null);
+    const syncUser = async () => {
+      const {
+        data: { user: serverUser },
+      } = await supabase.auth.getUser();
+
+      if (cancelled) return;
+      if (!serverUser) {
+        await supabase.auth.signOut();
+        if (cancelled) return;
+        setUser(null);
+        setAuthResolved(true);
+        return;
+      }
+
+      setUser(serverUser);
       setAuthResolved(true);
-    });
+    };
+
+    void syncUser();
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null);
-      setAuthResolved(true);
+    } = supabase.auth.onAuthStateChange((event) => {
+      if (event === "SIGNED_OUT") {
+        setUser(null);
+        setAuthResolved(true);
+        return;
+      }
+      void syncUser();
     });
 
     return () => {
+      cancelled = true;
       subscription.unsubscribe();
     };
   }, []);
@@ -78,7 +99,7 @@ export function Navbar() {
               </>
             ) : authResolved ? (
               <Link
-                href="/"
+                href="/login"
                 className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
               >
                 Sign in

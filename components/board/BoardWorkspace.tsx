@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState, type PointerEvent, type WheelEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent, type WheelEvent } from "react";
 import { useRouter } from "next/navigation";
+import type { RealtimeChannel } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/client";
 import { markBoardVisited } from "@/lib/boards/store";
 
@@ -19,10 +20,27 @@ type Viewport = {
   zoom: number;
 };
 
+type PresenceCursorPayload = {
+  sessionId: string;
+  userId: string;
+  label: string;
+  color: string;
+  worldX: number;
+  worldY: number;
+  sentAt: number;
+};
+
+type RemoteCursor = PresenceCursorPayload & {
+  key: string;
+  receivedAt: number;
+};
+
 const MIN_ZOOM = 0.01;
 const MAX_ZOOM = 64;
 const BASE_DOT_SPACING = 56;
 const MIN_SCREEN_DOT_SPACING = 14;
+const CURSOR_BROADCAST_MIN_INTERVAL_MS = 20;
+const CURSOR_STALE_TIMEOUT_MS = 10_000;
 
 const TOOLBAR_ITEMS: Array<{ id: ToolId; icon: string; description: string }> = [
   { id: "hand", icon: "✋", description: "Hand (drag board)" },
@@ -46,6 +64,7 @@ function colorFromSeed(seed: string) {
 
 export function BoardWorkspace({ boardId, userLabel, userId }: BoardWorkspaceProps) {
   const router = useRouter();
+  const supabase = useMemo(() => createClient(), []);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const contextRef = useRef<CanvasRenderingContext2D | null>(null);
   const sizeRef = useRef({ width: 0, height: 0, pixelRatio: 1 });
@@ -61,6 +80,15 @@ export function BoardWorkspace({ boardId, userLabel, userId }: BoardWorkspacePro
   });
   const [activeTool, setActiveTool] = useState<ToolId>("cursor");
   const [isDragging, setIsDragging] = useState(false);
+  const [remoteCursors, setRemoteCursors] = useState<Record<string, RemoteCursor>>({});
+
+  const presenceChannelRef = useRef<RealtimeChannel | null>(null);
+  const sessionIdRef = useRef(
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  );
+  const lastCursorSentAtRef = useRef(0);
 
   const userColor = colorFromSeed(userLabel || "user");
 
@@ -148,6 +176,82 @@ export function BoardWorkspace({ boardId, userLabel, userId }: BoardWorkspacePro
     markBoardVisited(boardId, userId);
   }, [boardId, userId]);
 
+  useEffect(() => {
+    const channel = supabase.channel(`board:${boardId}:presence`, {
+      config: {
+        presence: {
+          key: `${userId}:${sessionIdRef.current}`,
+        },
+      },
+    });
+    presenceChannelRef.current = channel;
+
+    const syncRemoteCursors = () => {
+      const now = Date.now();
+      const next: Record<string, RemoteCursor> = {};
+      const state = channel.presenceState<PresenceCursorPayload>();
+
+      for (const key of Object.keys(state)) {
+        const metas = state[key] ?? [];
+        const newest = metas[metas.length - 1];
+        if (!newest) continue;
+        if (newest.sessionId === sessionIdRef.current) continue;
+        next[key] = {
+          key,
+          ...newest,
+          receivedAt: now,
+        };
+      }
+
+      setRemoteCursors(next);
+    };
+
+    channel.on("presence", { event: "sync" }, syncRemoteCursors);
+    channel.subscribe(async (status) => {
+      if (status !== "SUBSCRIBED") return;
+      await channel.track({
+        sessionId: sessionIdRef.current,
+        userId,
+        label: userLabel,
+        color: userColor,
+        worldX: 0,
+        worldY: 0,
+        sentAt: Date.now(),
+      } satisfies PresenceCursorPayload);
+    });
+
+    return () => {
+      channel.untrack();
+      supabase.removeChannel(channel);
+      if (presenceChannelRef.current === channel) {
+        presenceChannelRef.current = null;
+      }
+      setRemoteCursors({});
+    };
+  }, [boardId, supabase, userColor, userId, userLabel]);
+
+  useEffect(() => {
+    const prune = window.setInterval(() => {
+      const now = Date.now();
+      setRemoteCursors((current) => {
+        let changed = false;
+        const next: Record<string, RemoteCursor> = {};
+        for (const [key, cursor] of Object.entries(current)) {
+          if (now - cursor.sentAt <= CURSOR_STALE_TIMEOUT_MS) {
+            next[key] = cursor;
+          } else {
+            changed = true;
+          }
+        }
+        return changed ? next : current;
+      });
+    }, 2000);
+
+    return () => {
+      window.clearInterval(prune);
+    };
+  }, []);
+
   const zoomAtScreenPoint = (screenX: number, screenY: number, zoomFactor: number) => {
     setViewport((current) => {
       const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, current.zoom * zoomFactor));
@@ -166,7 +270,31 @@ export function BoardWorkspace({ boardId, userLabel, userId }: BoardWorkspacePro
     });
   };
 
+  const maybeTrackCursor = (screenX: number, screenY: number) => {
+    const worldX = (screenX - viewportRef.current.x) / viewportRef.current.zoom;
+    const worldY = (screenY - viewportRef.current.y) / viewportRef.current.zoom;
+
+    const now = Date.now();
+    if (now - lastCursorSentAtRef.current < CURSOR_BROADCAST_MIN_INTERVAL_MS) {
+      return;
+    }
+
+    const channel = presenceChannelRef.current;
+    if (!channel) return;
+    lastCursorSentAtRef.current = now;
+    channel.track({
+      sessionId: sessionIdRef.current,
+      userId,
+      label: userLabel,
+      color: userColor,
+      worldX,
+      worldY,
+      sentAt: now,
+    } satisfies PresenceCursorPayload);
+  };
+
   const handleCanvasPointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
+    maybeTrackCursor(event.clientX, event.clientY);
     if (activeTool !== "hand") return;
 
     isDraggingRef.current = true;
@@ -182,6 +310,7 @@ export function BoardWorkspace({ boardId, userLabel, userId }: BoardWorkspacePro
   };
 
   const handleCanvasPointerMove = (event: PointerEvent<HTMLCanvasElement>) => {
+    maybeTrackCursor(event.clientX, event.clientY);
     if (!isDraggingRef.current || activeTool !== "hand") return;
     if (dragPointerIdRef.current !== event.pointerId) return;
     if (!dragOriginRef.current) return;
@@ -199,6 +328,7 @@ export function BoardWorkspace({ boardId, userLabel, userId }: BoardWorkspacePro
   };
 
   const handleCanvasPointerUp = (event: PointerEvent<HTMLCanvasElement>) => {
+    maybeTrackCursor(event.clientX, event.clientY);
     if (dragPointerIdRef.current === event.pointerId) {
       stopDragging();
     }
@@ -324,6 +454,7 @@ export function BoardWorkspace({ boardId, userLabel, userId }: BoardWorkspacePro
               <button
                 key={item.id}
                 type="button"
+                aria-label={item.description}
                 onClick={() => {
                   setActiveTool(item.id);
                   if (item.id !== "hand") {
@@ -355,6 +486,31 @@ export function BoardWorkspace({ boardId, userLabel, userId }: BoardWorkspacePro
           })}
         </div>
       </div>
+
+      {Object.values(remoteCursors).map((cursor) => {
+        const left = viewport.x + cursor.worldX * viewport.zoom;
+        const top = viewport.y + cursor.worldY * viewport.zoom;
+        return (
+          <div
+            key={cursor.key}
+            data-testid={`remote-cursor-${cursor.key}`}
+            data-user-id={cursor.userId}
+            data-session-id={cursor.sessionId}
+            data-sent-at={String(cursor.sentAt)}
+            data-received-at={String(cursor.receivedAt)}
+            className="pointer-events-none absolute z-30"
+            style={{ left, top, transform: "translate(-2px, -2px)" }}
+          >
+            <div className="h-4 w-4 rotate-45 rounded-[2px]" style={{ backgroundColor: cursor.color }} />
+            <div
+              className="mt-1 inline-block rounded-md px-2 py-0.5 text-xs font-medium text-white shadow-sm"
+              style={{ backgroundColor: cursor.color }}
+            >
+              {cursor.label}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }

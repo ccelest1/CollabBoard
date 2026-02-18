@@ -2,14 +2,21 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { AuthForm } from "@/components/AuthForm";
 
-export default async function LoginPage() {
+function safeRedirectPath(candidate: string | null | undefined, fallback: string) {
+  if (!candidate) return fallback;
+  if (!candidate.startsWith("/")) return fallback;
+  if (candidate.startsWith("//")) return fallback;
+  return candidate;
+}
+
+export default async function LoginPage({ searchParams }: { searchParams?: { redirect?: string } }) {
   const supabase = await createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
 
   if (user) {
-    redirect("/dashboard");
+    redirect(safeRedirectPath(searchParams?.redirect, "/dashboard"));
   }
 
   return (

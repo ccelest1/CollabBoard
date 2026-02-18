@@ -9,7 +9,7 @@ vendor/
 bower_components/
 .pnp/
 .pnp.js
-
+    
 # Build outputs
 dist/
 build/

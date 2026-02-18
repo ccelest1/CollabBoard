@@ -1,6 +1,13 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
+function safeRedirectPath(candidate: string | null | undefined, fallback: string) {
+  if (!candidate) return fallback;
+  if (!candidate.startsWith("/")) return fallback;
+  if (candidate.startsWith("//")) return fallback;
+  return candidate;
+}
+
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
 
@@ -25,17 +32,23 @@ export async function updateSession(request: NextRequest) {
     },
   });
 
-  const { data } = await supabase.auth.getClaims();
-  const user = data?.claims;
+  const pathname = request.nextUrl.pathname;
+  const isProtectedRoute = pathname.startsWith("/dashboard") || pathname.startsWith("/board");
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
 
-  if (
-    !user &&
-    !request.nextUrl.pathname.startsWith("/login") &&
-    !request.nextUrl.pathname.startsWith("/auth")
-  ) {
+  if (!user && isProtectedRoute) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
+    const intended = `${request.nextUrl.pathname}${request.nextUrl.search}`;
+    url.searchParams.set("redirect", safeRedirectPath(intended, "/dashboard"));
     return NextResponse.redirect(url);
+  }
+
+  if (user && pathname === "/login") {
+    const redirectTarget = safeRedirectPath(request.nextUrl.searchParams.get("redirect"), "/dashboard");
+    return NextResponse.redirect(new URL(redirectTarget, request.url));
   }
 
   return supabaseResponse;
