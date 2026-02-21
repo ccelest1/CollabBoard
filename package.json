@@ -7,32 +7,46 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "costs:update": "tsx scripts/updateCostAnalysis.ts",
+    "test:ai": "vitest run tests/ai/",
+    "test:ai:watch": "vitest watch tests/ai/",
     "test:e2e": "playwright test",
     "test:e2e:routes": "playwright test e2e/routes",
     "test:e2e:perf": "playwright test e2e/perf",
     "test:perf": "npm run test:e2e:perf"
   },
   "dependencies": {
+    "@langchain/core": "^1.1.27",
+    "@langchain/langgraph": "^1.1.5",
+    "@langchain/openai": "^1.2.9",
     "@supabase/ssr": "^0.8.0",
     "@supabase/supabase-js": "^2.95.3",
     "fabric": "^7.1.0",
+    "langsmith": "^0.5.4",
     "next": "14.2.35",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "three": "^0.179.1"
+    "three": "^0.179.1",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@playwright/test": "^1.55.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",
     "@types/three": "^0.179.0",
-    "@playwright/test": "^1.55.0",
     "autoprefixer": "^10.4.20",
     "eslint": "^8",
     "eslint-config-next": "14.2.35",
+    "jsdom": "^28.1.0",
     "postcss": "^8",
     "tailwindcss": "^3.4.1",
+    "tsx": "^4.21.0",
     "typescript": "^5",
+    "vitest": "^4.0.18",
     "ws": "^8.18.3"
   }
 }

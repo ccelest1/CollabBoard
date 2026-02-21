@@ -6,6 +6,7 @@ import type { RealtimeChannel } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/client";
 import ContextMenu from "@/components/ContextMenu";
 import ConnectionPointModal from "@/components/ConnectionPointModal";
+import { AIAgentPanel } from "@/components/board/AIAgentPanel";
 import { getBoards, markBoardVisited, sanitizeBoardId } from "@/lib/boards/store";
 import {
   createBoardObject,
@@ -40,6 +41,12 @@ type Viewport = {
   x: number;
   y: number;
   zoom: number;
+};
+type BoundingBox = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 };
 
 type PresenceCursorPayload = {
@@ -2140,6 +2147,26 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
     zoomAtScreenPoint(width / 2, height / 2, direction === "in" ? 1.15 : 1 / 1.15);
   };
 
+  const centerViewportOnBoundingBox = (boundingBox: BoundingBox | null) => {
+    if (!boundingBox) return;
+    const width = sizeRef.current.width || window.innerWidth;
+    const height = sizeRef.current.height || window.innerHeight;
+    if (width <= 0 || height <= 0) return;
+
+    const paddedWidth = Math.max(1, boundingBox.width * 1.4);
+    const paddedHeight = Math.max(1, boundingBox.height * 1.4);
+    const fitZoom = Math.min(width / paddedWidth, height / paddedHeight);
+    const nextZoom = Math.min(1.5, Math.max(0.75, fitZoom));
+    const centerX = boundingBox.x + boundingBox.width / 2;
+    const centerY = boundingBox.y + boundingBox.height / 2;
+
+    setViewport({
+      zoom: nextZoom,
+      x: width / 2 - centerX * nextZoom,
+      y: height / 2 - centerY * nextZoom,
+    });
+  };
+
   const resetZoomToDefault = () => {
     const { width, height } = sizeRef.current;
     if (width === 0 || height === 0) return;
@@ -2170,6 +2197,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
       // ignore clipboard write failures
     }
   };
+
 
   const selectedObjects = selectedObjectIds
     .map((id) => boardState.objects[id])
@@ -2747,9 +2775,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
         </div>
       </div>
 
-      <div className="absolute bottom-5 right-5 h-20 w-20 rounded-2xl border border-slate-400 bg-white shadow-sm">
-        <div className="flex h-full w-full items-center justify-center rounded-2xl text-base font-semibold">AI</div>
-      </div>
+      <AIAgentPanel boardId={boardId} userId={userId} onCommandSuccess={centerViewportOnBoundingBox} />
 
       <div className="absolute bottom-6 left-1/2 -translate-x-1/2 rounded-2xl border border-slate-400 bg-white p-2 shadow-sm">
         <div className="flex items-center gap-2">
