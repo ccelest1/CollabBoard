@@ -35,7 +35,7 @@ export function ThemeToggle() {
     return (
       <button
         type="button"
-        className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-600"
+        className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-600 dark:border-[#444444] dark:bg-[#282928] dark:text-white"
         aria-label="Toggle theme"
       >
         Theme
@@ -47,7 +47,7 @@ export function ThemeToggle() {
     <button
       type="button"
       onClick={toggleTheme}
-      className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+      className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 dark:border-[#444444] dark:bg-[#282928] dark:text-white dark:hover:bg-[#323332]"
       aria-label="Toggle theme"
     >
       {theme === "dark" ? "Light mode" : "Dark mode"}

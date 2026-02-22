@@ -284,7 +284,7 @@ export function DashboardClient({ userId }: DashboardClientProps) {
         <h1 className="text-center text-4xl font-semibold text-slate-900"> Dashboard</h1>
         <button
           type="button"
-          onClick={() => router.push("/bendverse")}
+          onClick={() => router.push("/boardverse")}
           className="absolute left-0 top-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
         >
           Go to BENDverse
