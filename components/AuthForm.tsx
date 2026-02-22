@@ -27,6 +27,13 @@ export function AuthForm() {
   };
 
   useEffect(() => {
+    const modeParam = searchParams.get("mode");
+    if (modeParam === "sign-up" || modeParam === "sign-in") {
+      setMode(modeParam);
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
     return () => {
       if (authPollRef.current) {
         window.clearInterval(authPollRef.current);

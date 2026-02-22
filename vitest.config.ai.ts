@@ -10,6 +10,7 @@ export default defineConfig({
     testTimeout: 60000,
     hookTimeout: 10000,
     reporters: ["verbose"],
+    setupFiles: ["tests/setup.ts"],
   },
   resolve: {
     alias: { "@": path.resolve(__dirname, ".") },

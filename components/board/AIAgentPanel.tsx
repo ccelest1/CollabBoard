@@ -16,6 +16,8 @@ type AIAgentPanelProps = {
   isOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
   onCommandSuccess?: (boundingBox: { x: number; y: number; width: number; height: number } | null) => void;
+  onAIActionStart?: () => void;
+  onAIActionComplete?: (boundingBox: { x: number; y: number; width: number; height: number } | null) => void;
   boardObjects: Array<{ id: string; type: string }>;
 };
 
@@ -121,6 +123,8 @@ export function AIAgentPanel({
   isOpen: isOpenProp,
   onOpenChange,
   onCommandSuccess,
+  onAIActionStart,
+  onAIActionComplete,
   boardObjects,
 }: AIAgentPanelProps) {
   const [internalIsOpen, setInternalIsOpen] = useState(false);
@@ -229,6 +233,7 @@ export function AIAgentPanel({
       },
     ]);
     abortControllerRef.current = new AbortController();
+    onAIActionStart?.();
 
     try {
       const response = await fetch("/api/ai/command", {
@@ -264,8 +269,10 @@ export function AIAgentPanel({
         );
         const boundsPayload = (await boundsResponse.json()) as BoardBoundsResponse;
         onCommandSuccess?.(boundsPayload.bounds ?? null);
+        onAIActionComplete?.(boundsPayload.bounds ?? null);
       } catch {
         onCommandSuccess?.(null);
+        onAIActionComplete?.(null);
       }
       abortControllerRef.current = null;
     } catch (caught) {
@@ -278,6 +285,7 @@ export function AIAgentPanel({
         (caught instanceof DOMException && caught.name === "AbortError") ||
         (caught instanceof Error && caught.message.toLowerCase().includes("abort"));
       showStatusMessage(aborted ? "Request stopped" : responseError);
+      onAIActionComplete?.(null);
       abortControllerRef.current = null;
     }
   };

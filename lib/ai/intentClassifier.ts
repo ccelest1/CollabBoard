@@ -107,7 +107,7 @@ export function classifyIntent(command: string): Intent {
   const hasSequenceWord =
     lowered.includes("and then") || lowered.includes("then ") || lowered.includes("and make") || lowered.includes("and change");
   if (hasCreateVerb && hasChangeVerb && hasSequenceWord) {
-    return "create_then_modify";
+    return "create_single";
   }
 
   if (hasCreateVerb || lowered.includes("i need") || lowered.includes("i want")) {
