@@ -9,7 +9,7 @@ export default defineConfig({
     environment: "node",
     testTimeout: 60000,
     hookTimeout: 10000,
-    reporter: ["verbose"],
+    reporters: ["verbose"],
   },
   resolve: {
     alias: { "@": path.resolve(__dirname, ".") },
