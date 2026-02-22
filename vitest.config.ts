@@ -1,16 +1,18 @@
-import { resolve } from "node:path";
 import { defineConfig } from "vitest/config";
+import path from "path";
 
 export default defineConfig({
   test: {
+    name: "AI Agent Tests",
+    include: ["tests/ai/**/*.test.ts"],
     globals: true,
-    environment: "jsdom",
-    setupFiles: ["./tests/setup.ts"],
-    include: ["tests/ai/**/*.test.{ts,tsx}"],
+    environment: "node",
+    testTimeout: 60000,
+    hookTimeout: 10000,
+    reporters: ["verbose"],
+    setupFiles: ["tests/setup.ts"],  // ADD THIS
   },
   resolve: {
-    alias: {
-      "@": resolve(__dirname, "."),
-    },
+    alias: { "@": path.resolve(__dirname, ".") },
   },
 });

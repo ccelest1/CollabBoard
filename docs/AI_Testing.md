@@ -11,7 +11,7 @@
 ## Run tests
 
 - One-off run:
-  - `npm run test:ai`
+- `npm run test:ai`
 - Watch mode:
   - `npm run test:ai:watch`
 

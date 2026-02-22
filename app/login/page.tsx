@@ -25,7 +25,7 @@ export default async function LoginPage({ searchParams }: { searchParams?: { red
         <h1 className="flex items-center justify-center text-3xl font-semibold tracking-tight text-slate-900 dark:text-white">
           <span aria-label="CB" className="block text-7xl font-black leading-none tracking-tight text-slate-900 dark:text-white">
             <img
-              src="/icons/bend-logo-halftone-arch-dark.png"
+              src="/icons/bend-logo-halftone-arch-light.png"
               alt="BEND"
               className="mx-auto block dark:hidden"
               style={{
@@ -35,7 +35,7 @@ export default async function LoginPage({ searchParams }: { searchParams?: { red
               }}
             />
             <img
-              src="/icons/bend-logo-halftone-arch-light.png"
+              src="/icons/bend-logo-halftone-arch-dark.png"
               alt="BEND"
               className="mx-auto hidden dark:block"
               style={{

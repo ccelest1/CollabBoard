@@ -10,6 +10,9 @@ import { createBoardEventsChannel, sendBoardRealtimeEvent, subscribeChannel } fr
 import { findEmptyPlacement } from "@/lib/ai/boardState";
 import { recordChange } from "@/lib/supabase/versionHistory";
 import { classifyIntent, isInvalidInput } from "@/lib/ai/intentClassifier";
+import { splitIntoSteps } from "@/lib/ai/commandSplitter";
+import { getOrCreateSession } from "@/lib/ai/sessionMemory";
+import { resolveReferences, injectResolvedIds } from "@/lib/ai/referenceResolver";
 
 type CommandType = "creation" | "manipulation" | "layout" | "complex";
 type AgentBoundingBox = {
@@ -1044,7 +1047,11 @@ function resolveByColor(lowered: string, objects: BoardObject[]): BoardObject[] 
   return [];
 }
 
-function resolveDeleteTargets(command: string, objects: BoardObject[]): BoardObject[] {
+function resolveDeleteTargets(
+  command: string,
+  objects: BoardObject[],
+  sessionCreatedIds?: string[],
+): BoardObject[] {
   const lowered = command.toLowerCase();
   const hasTypeKeyword =
     /(sticky|stickynote|note|stickies|post-it|postit|frame|frames|container|section|rectangle|rectangles|square|squares|box|boxes|shape|shapes|circle|circles|oval|ovals|arrow|arrows|connector|connectors|line|lines|text|textbox|text box|label)/.test(
@@ -1088,6 +1095,14 @@ function resolveDeleteTargets(command: string, objects: BoardObject[]): BoardObj
     !hasTemplateKeyword &&
     !hasColorKeyword
   ) {
+    if (sessionCreatedIds && sessionCreatedIds.length > 0) {
+      const idSet = new Set(sessionCreatedIds);
+      const sessionTargets = objects.filter((o) => idSet.has(o.id));
+      if (sessionTargets.length > 0) {
+        console.log("[delete] resolved 'those/them' to session-created objects:", sessionCreatedIds);
+        return sessionTargets;
+      }
+    }
     return objects;
   }
 
@@ -1200,10 +1215,11 @@ async function executeDelete(params: {
   boardId: string;
   start: number;
   command: string;
+  sessionCreatedIds?: string[];
   handlers: BoardMutationHandlers;
   toolsByName: Record<string, { invoke: (input: any, config?: any) => Promise<any> }>;
 }) {
-  const objects = await getFreshBoardState({ boardId: params.boardId, handlers: params.handlers });
+  let objects = await getFreshBoardState({ boardId: params.boardId, handlers: params.handlers });
   console.log("[delete] boardId received:", params.boardId);
   console.log("[delete] getBoardState returned:", objects.length, "objects");
   console.log("[delete] board state:", {
@@ -1211,6 +1227,17 @@ async function executeDelete(params: {
     totalObjects: objects.length,
     types: objects.map((object) => ({ id: object.id, type: object.type, text: object.text })),
   });
+
+  if (objects.length === 0) {
+    const cached = readBoardCache(params.boardId);
+    if (cached.length > 0) {
+      console.log("[delete] Supabase empty, using in-memory cache");
+      objects = cached;
+    } else {
+      await sleep(600);
+      objects = await getFreshBoardState({ boardId: params.boardId, handlers: params.handlers });
+    }
+  }
 
   if (objects.length === 0) {
     return {
@@ -1222,7 +1249,7 @@ async function executeDelete(params: {
     };
   }
 
-  const targets = resolveDeleteTargets(params.command, objects);
+  const targets = resolveDeleteTargets(params.command, objects, params.sessionCreatedIds);
   console.log("[delete] targets resolved:", targets.length, targets.map(getObjectLabel));
 
   if (targets.length === 0) {
@@ -1242,6 +1269,13 @@ async function executeDelete(params: {
     await params.toolsByName.deleteObject.invoke({ objectId: object.id });
     deletedIds.push(object.id);
     await sleep(150);
+  }
+
+  const boardCache = boardObjectCache.get(params.boardId);
+  if (boardCache) {
+    for (const id of deletedIds) {
+      boardCache.delete(id);
+    }
   }
 
   const label = targets.length === 1 ? "1 object" : `${targets.length} objects`;
@@ -1453,6 +1487,7 @@ export async function runAgentCommand(params: {
   userId: string;
   userName?: string;
   targetObjectId?: string;
+  _sessionCreatedIds?: string[];
   signal?: AbortSignal;
 }): Promise<{
   summary: string;
@@ -1471,6 +1506,73 @@ export async function runAgentCommand(params: {
     const result = await (async () => {
     const command = sanitizeCommand(params.command);
     console.log("[Agent] command received:", command);
+    const steps = splitIntoSteps(command);
+
+    if (steps.length > 1) {
+      const sessionId = `${params.boardId}::${params.userId}::${Date.now()}`;
+      const session = getOrCreateSession(sessionId);
+
+      const stepSummaries: string[] = [];
+      const allObjectsAffected: string[] = [];
+      const allObjectsCreated: BoardObject[] = [];
+      let lastBoundingBox: AgentBoundingBox | null = null;
+
+      for (const step of steps) {
+        try {
+          const { resolvedIds, isReferenceToCreated } = resolveReferences({
+            stepCommand: step,
+            sessionMemory: session,
+            boardObjects: [],
+          });
+
+          const resolvedStep =
+            isReferenceToCreated && resolvedIds.length > 0
+              ? injectResolvedIds(step, resolvedIds)
+              : step;
+
+          const stepResult = await runAgentCommand({
+            command: resolvedStep,
+            boardId: params.boardId,
+            userId: params.userId,
+            userName: params.userName,
+            signal: params.signal,
+            _sessionCreatedIds: isReferenceToCreated ? resolvedIds : undefined,
+          });
+          console.log("[multi-step] step result:", {
+            step: resolvedStep,
+            objectsCreated: stepResult.objectsCreated?.length ?? 0,
+            objectsAffected: stepResult.objectsAffected,
+            summary: stepResult.summary,
+          });
+
+          stepSummaries.push(stepResult.summary);
+          allObjectsAffected.push(...stepResult.objectsAffected);
+
+          if (stepResult.objectsCreated && stepResult.objectsCreated.length > 0) {
+            allObjectsCreated.push(...stepResult.objectsCreated);
+            session.recordCreated(stepResult.objectsCreated);
+          }
+
+          if (stepResult.boundingBox) {
+            lastBoundingBox = stepResult.boundingBox;
+          }
+        } catch (err) {
+          console.error(`[multi-step] step failed: "${step}"`, err);
+          stepSummaries.push(`failed: ${step}`);
+        }
+      }
+
+      const combinedBox = computeBoundingBox(allObjectsCreated) ?? lastBoundingBox;
+
+      return {
+        summary: stepSummaries.filter(Boolean).join(". "),
+        objectsAffected: [...new Set(allObjectsAffected)],
+        durationMs: Date.now() - startedAt,
+        boundingBox: combinedBox,
+        objectsCreated: allObjectsCreated,
+      };
+    }
+
     if (isInvalidInput(command)) {
       return {
         summary: "Please enter a valid board command",
@@ -1533,20 +1635,13 @@ export async function runAgentCommand(params: {
     };
 
     if (intent === "delete") {
+      const sessionCreatedIds = params._sessionCreatedIds ?? [];
       return executeDelete({
         boardId: params.boardId,
         start: startedAt,
         command,
+        sessionCreatedIds,
         handlers,
-        toolsByName,
-      });
-    }
-
-    if (intent === "create_then_modify") {
-      return executeCreateThenModify({
-        boardId: params.boardId,
-        start: startedAt,
-        command,
         toolsByName,
       });
     }
@@ -1865,6 +1960,7 @@ export async function runAgentCommand(params: {
         objectsAffected: affectedIds,
         durationMs: Date.now() - startedAt,
         boundingBox,
+        objectsCreated: createdObjects,
       };
     }
 
@@ -1891,6 +1987,7 @@ export async function runAgentCommand(params: {
         objectsAffected: affectedIds,
         durationMs: Date.now() - startedAt,
         boundingBox: computeBoundingBox(createdObjects) ?? (await getBoundingBoxForAffectedObjects(handlers, affectedIds)),
+        objectsCreated: createdObjects,
       };
     }
 
@@ -1923,6 +2020,7 @@ export async function runAgentCommand(params: {
         objectsAffected: affectedIds,
         durationMs: Date.now() - startedAt,
         boundingBox,
+        objectsCreated: createdObjects,
       };
     }
 
@@ -1951,6 +2049,7 @@ export async function runAgentCommand(params: {
         objectsAffected: affectedIds,
         durationMs: Date.now() - startedAt,
         boundingBox,
+        objectsCreated: createdObjects,
       };
     }
 
@@ -2176,6 +2275,7 @@ export async function runAgentCommand(params: {
         objectsAffected: affectedIds,
         durationMs: Date.now() - startedAt,
         boundingBox: computeBoundingBox(createdObjects) ?? (await getBoundingBoxForAffectedObjects(handlers, affectedIds)),
+        objectsCreated: createdObjects,
       };
     }
 
@@ -2363,6 +2463,7 @@ export async function runAgentCommand(params: {
         objectsAffected: affectedIds,
         durationMs: Date.now() - startedAt,
         boundingBox: computeBoundingBox(createdObjects) ?? (await getBoundingBoxForAffectedObjects(handlers, affectedIds)),
+        objectsCreated: createdObjects,
       };
     }
 
@@ -2398,6 +2499,7 @@ export async function runAgentCommand(params: {
         objectsAffected: affectedIds,
         durationMs: Date.now() - startedAt,
         boundingBox: computeBoundingBox(createdObjects) ?? (await getBoundingBoxForAffectedObjects(handlers, affectedIds)),
+        objectsCreated: createdObjects,
       };
     }
 
@@ -2437,6 +2539,7 @@ export async function runAgentCommand(params: {
         objectsAffected: affectedIds,
         durationMs: Date.now() - startedAt,
         boundingBox,
+        objectsCreated: createdObjects,
       };
     }
 
@@ -2625,6 +2728,7 @@ export async function runAgentCommand(params: {
       objectsAffected: affectedIds,
       durationMs: Date.now() - startedAt,
       boundingBox,
+      objectsCreated: allCreatedObjects,
     };
     })();
 

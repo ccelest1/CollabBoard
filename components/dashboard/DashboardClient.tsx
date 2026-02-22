@@ -279,7 +279,7 @@ export function DashboardClient({ userId }: DashboardClientProps) {
   );
 
   return (
-    <div className="mx-auto w-full max-w-6xl min-h-[calc(100vh-11rem)] rounded-xl border border-slate-300/70 bg-white/60 px-6 py-6 shadow-sm backdrop-blur-md md:px-7 md:py-8">
+    <div className="mx-auto w-full max-w-6xl min-h-[calc(100vh-11rem)] px-6 py-6 md:px-7 md:py-8">
       <div className="relative min-h-[132px] md:min-h-[120px]">
         <h1 className="text-center text-4xl font-semibold text-slate-900"> Dashboard</h1>
         <button

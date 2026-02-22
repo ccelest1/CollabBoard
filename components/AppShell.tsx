@@ -7,9 +7,10 @@ import { Navbar } from "@/components/Navbar";
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const isBoardRoute = pathname?.startsWith("/board/");
+  const isHomeRoute = pathname === "/";
   const backgroundMode = pathname === "/" ? "home" : pathname?.startsWith("/dashboard") ? "dashboard" : "default";
 
-  if (isBoardRoute) {
+  if (isBoardRoute || isHomeRoute) {
     return <main className="min-h-screen">{children}</main>;
   }
 

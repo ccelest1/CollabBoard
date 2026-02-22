@@ -33,6 +33,7 @@ import {
 } from "@/lib/supabase/boardRealtime";
 import { loadPersistedBoardSnapshot, savePersistedBoardSnapshot } from "@/lib/supabase/boardStateStore";
 import { recordChange } from "@/lib/supabase/versionHistory";
+import { animateCameraToBox, cancelCurrentAnimation, fitAllToScreen } from "@/lib/ui/cameraAnimator";
 
 type BoardWorkspaceProps = {
   boardId: string;
@@ -391,6 +392,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
   const lastSnapshotRequestAtRef = useRef(0);
   const historyDropdownRef = useRef<HTMLDivElement | null>(null);
   const overflowMenuRef = useRef<HTMLDivElement | null>(null);
+  const aiFitTimeoutRef = useRef<number | null>(null);
 
   const userColor = colorFromUserId(userId || "user");
   const debugLog = (...args: unknown[]) => {
@@ -2242,6 +2244,123 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
     zoomAtScreenPoint(width / 2, height / 2, direction === "in" ? 1.15 : 1 / 1.15);
   };
 
+  const getCameraCanvas = () => {
+    const width = sizeRef.current.width || window.innerWidth;
+    const height = sizeRef.current.height || window.innerHeight;
+    if (width <= 0 || height <= 0) return null;
+
+    const viewportState = viewportRef.current;
+    const objects = boardStateRef.current.order
+      .map((id) => boardStateRef.current.objects[id])
+      .filter((object): object is BoardObject => Boolean(object))
+      .map((object) => ({
+        left: object.x,
+        top: object.y,
+        width: object.width,
+        height: object.height,
+        scaleX: 1,
+        scaleY: 1,
+      }));
+
+    const canvasLike = {
+      viewportTransform: [viewportState.zoom, 0, 0, viewportState.zoom, viewportState.x, viewportState.y] as [
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+      ],
+      getWidth: () => width,
+      getHeight: () => height,
+      setViewportTransform: (transform: [number, number, number, number, number, number]) => {
+        const nextViewport = {
+          zoom: transform[0] ?? 1,
+          x: transform[4] ?? 0,
+          y: transform[5] ?? 0,
+        };
+        canvasLike.viewportTransform = transform;
+        viewportRef.current = nextViewport;
+        setViewport(nextViewport);
+      },
+      requestRenderAll: () => {
+        drawBoard(viewportRef.current, boardStateRef.current, selectedIdsRef.current, remoteCursorsRef.current);
+      },
+      getObjects: () => objects,
+    };
+
+    return canvasLike;
+  };
+
+  const onAIActionStart = () => {
+    const cameraCanvas = getCameraCanvas();
+    if (!cameraCanvas) return;
+    const animCanvas = cameraCanvas as unknown as Parameters<typeof animateCameraToBox>[0]["canvas"];
+
+    const objects = boardStateRef.current.order
+      .map((id) => boardStateRef.current.objects[id])
+      .filter((object): object is BoardObject => Boolean(object));
+    if (objects.length === 0) return;
+
+    const rightmostX = Math.max(...objects.map((object) => objectBounds(object).right));
+    const minY = Math.min(...objects.map((object) => objectBounds(object).top));
+    const maxY = Math.max(...objects.map((object) => objectBounds(object).bottom));
+    const centerY = (minY + maxY) / 2;
+    const padding = 80;
+    const targetZoom = 0.6;
+    const viewportWidth = cameraCanvas.getWidth();
+    const viewportHeight = cameraCanvas.getHeight();
+    const desiredBoxWidth = Math.max(1, (viewportWidth - padding * 2) / targetZoom);
+    const desiredBoxHeight = Math.max(1, (viewportHeight - padding * 2) / targetZoom);
+    const centerX = rightmostX + 120;
+
+    void animateCameraToBox({
+      canvas: animCanvas,
+      box: {
+        x: centerX - desiredBoxWidth / 2,
+        y: centerY - desiredBoxHeight / 2,
+        width: desiredBoxWidth,
+        height: desiredBoxHeight,
+      },
+      padding,
+      durationMs: 300,
+    });
+  };
+
+  const onAIActionComplete = (box: BoundingBox | null) => {
+    const cameraCanvas = getCameraCanvas();
+    if (!cameraCanvas) return;
+    const animCanvas = cameraCanvas as unknown as Parameters<typeof animateCameraToBox>[0]["canvas"];
+
+    if (aiFitTimeoutRef.current !== null) {
+      window.clearTimeout(aiFitTimeoutRef.current);
+      aiFitTimeoutRef.current = null;
+    }
+
+    if (box) {
+      cancelCurrentAnimation();
+      void animateCameraToBox({
+        canvas: animCanvas,
+        box,
+        padding: 80,
+        durationMs: 400,
+      });
+      aiFitTimeoutRef.current = window.setTimeout(() => {
+        const fitCanvas = getCameraCanvas();
+        if (!fitCanvas) return;
+        fitAllToScreen({
+          canvas: fitCanvas as unknown as Parameters<typeof fitAllToScreen>[0]["canvas"],
+          padding: 120,
+          durationMs: 500,
+        });
+        aiFitTimeoutRef.current = null;
+      }, 1200);
+      return;
+    }
+
+    fitAllToScreen({ canvas: animCanvas, padding: 120, durationMs: 500 });
+  };
+
   const centerViewportOnBoundingBox = (boundingBox: BoundingBox | null) => {
     if (!boundingBox) return;
     const width = sizeRef.current.width || window.innerWidth;
@@ -2276,6 +2395,16 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
       };
     });
   };
+
+  useEffect(() => {
+    return () => {
+      cancelCurrentAnimation();
+      if (aiFitTimeoutRef.current !== null) {
+        window.clearTimeout(aiFitTimeoutRef.current);
+        aiFitTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   const handleSignOut = async () => {
     setSigningOut(true);
@@ -3178,6 +3307,8 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
           setOpenPanel((current) => (current === "ai" ? null : current));
         }}
         onCommandSuccess={centerViewportOnBoundingBox}
+        onAIActionStart={onAIActionStart}
+        onAIActionComplete={onAIActionComplete}
         boardObjects={boardObjectsForAi}
       />
 

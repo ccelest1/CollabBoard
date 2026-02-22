@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { AppShell } from "@/components/AppShell";
+import { ThemeInitializer } from "@/components/ThemeInitializer";
 
 export const metadata: Metadata = {
   title: "BEND",
@@ -21,6 +22,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="relative min-h-screen overflow-x-hidden antialiased">
+        <ThemeInitializer />
         <AppShell>{children}</AppShell>
       </body>
     </html>
