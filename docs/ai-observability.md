@@ -8,14 +8,14 @@ Each `runAgentCommand` invocation attaches LangSmith metadata and tracing contex
 - `boardId`
 - `commandType` (`creation`, `manipulation`, `layout`, `complex`)
 - `model` (`gpt-4o-mini` or `gpt-4o`)
-- tags: `collabboard`, `agent`, and command type
+- tags: `bend`, `agent`, and command type
 - tool calls and tool outputs (for board mutations)
 - latency and status/error information from LangSmith
 
 ## Reading a multi-step trace
 
 1. Open a run in LangSmith.
-2. Identify the top-level agent run (`runName: collabboard-agent-command`).
+2. Identify the top-level agent run (`runName: bend-agent-command`).
 3. Inspect child tool runs in execution order:
    - `getBoardState` (if used)
    - creation/mutation tools (e.g. `createFrame`, `moveObject`)

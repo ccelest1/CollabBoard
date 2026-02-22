@@ -6,9 +6,9 @@ export type BoardRecord = {
   lastVisitedAt: number;
 };
 
-const STORAGE_KEY_PREFIX = "collabboard.boards.v1";
-const BOARD_CATALOG_KEY = "collabboard.boardCatalog.v1";
-const BOARD_SYNC_KEY = "collabboard.boardSync.v1";
+const STORAGE_KEY_PREFIX = "bend.boards.v1";
+const BOARD_CATALOG_KEY = "bend.boardCatalog.v1";
+const BOARD_SYNC_KEY = "bend.boardSync.v1";
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 function canUseStorage() {
@@ -165,7 +165,7 @@ function saveBoards(entries: BoardRecord[], userScope: string) {
 function notifyBoardStoreUpdated() {
   if (!canUseStorage()) return;
   window.localStorage.setItem(BOARD_SYNC_KEY, String(Date.now()));
-  window.dispatchEvent(new Event("collabboard:boards-updated"));
+  window.dispatchEvent(new Event("bend:boards-updated"));
 }
 
 function upsertBoard(next: BoardRecord, userScope: string) {

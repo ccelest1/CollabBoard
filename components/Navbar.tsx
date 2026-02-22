@@ -71,14 +71,38 @@ export function Navbar() {
   };
 
   return (
-    <nav className="pt-3">
+    <nav className="relative z-50 pt-3">
       <div className="container mx-auto px-4">
-        <div className="flex h-14 items-center justify-between rounded-xl border border-slate-300 bg-white/95 px-4 shadow-sm backdrop-blur">
+        <div className="flex h-14 items-center justify-between rounded-xl border border-slate-300 bg-white/95 px-4 shadow-sm backdrop-blur dark:border-white dark:bg-black/70">
           <Link
             href="/"
-            className="text-lg font-semibold text-slate-900 hover:text-slate-700"
+            className="flex items-center text-slate-900 hover:text-slate-700 dark:text-white dark:hover:text-slate-200"
           >
-            CollabBoard
+            <span
+              aria-label="CB"
+              className="block text-2xl font-black leading-none tracking-tight text-slate-900 dark:text-white"
+            >
+              <img
+                src="/icons/bend-logo-halftone-arch-dark.png"
+                alt="BEND"
+                className="block dark:hidden"
+                style={{
+                  height: 36,
+                  width: "auto",
+                  objectFit: "contain",
+                }}
+              />
+              <img
+                src="/icons/bend-logo-halftone-arch-light.png"
+                alt="BEND"
+                className="hidden dark:block"
+                style={{
+                  height: 36,
+                  width: "auto",
+                  objectFit: "contain",
+                }}
+              />
+            </span>
           </Link>
 
           <div className="flex items-center gap-4">
@@ -87,22 +111,22 @@ export function Navbar() {
               <>
                 <Link
                   href="/dashboard"
-                  className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+                  className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 dark:border-white/80 dark:text-white dark:hover:bg-white/10"
                 >
                   Dashboard
                 </Link>
                 <Link
-                  href="/boardverse"
-                  className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+                  href="/bendverse"
+                  className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 dark:border-white/80 dark:text-white dark:hover:bg-white/10"
                 >
-                  Boardverse
+                  BENDverse
                 </Link>
-                <span className="text-sm text-slate-600">{`Welcome, ${displayName}`}</span>
+                <span className="text-sm text-slate-600 dark:text-slate-200">{`Welcome, ${displayName}`}</span>
                 <button
                   type="button"
                   onClick={handleSignOut}
                   disabled={signingOut}
-                  className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-white dark:bg-black/20 dark:text-white dark:hover:bg-white/10"
                 >
                   {signingOut ? "Signing out..." : "Sign out"}
                 </button>
@@ -110,12 +134,12 @@ export function Navbar() {
             ) : authResolved ? (
               <Link
                 href="/login"
-                className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+                className="rounded-md border border-slate-900 bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 dark:border-white dark:bg-black/20 dark:text-white dark:hover:bg-white/10"
               >
                 Sign in
               </Link>
             ) : (
-              <span className="text-sm text-slate-500">Loading...</span>
+              <span className="text-sm text-slate-500 dark:text-slate-300">Loading...</span>
             )}
           </div>
         </div>

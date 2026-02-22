@@ -19,7 +19,7 @@ test("board operations: inline text edit, selection handles, transforms, connect
     waitUntil: "networkidle",
   });
   await page.locator("canvas").first().waitFor();
-  await page.evaluate(() => window.__collabboardPerf?.clearObjects());
+  await page.evaluate(() => window.__bendPerf?.clearObjects());
 
   const canvas = page.locator("canvas").first();
   const box = await canvas.boundingBox();

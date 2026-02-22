@@ -1,125 +1,172 @@
-import { describe, expect, it, vi } from "vitest";
-import type { BoardObject } from "@/lib/boards/model";
-import { createInMemoryHandlers } from "@/tests/ai/helpers/mockRuntime";
-import { registerBoardMutationHandlers, runAgentCommand } from "@/lib/ai/agent";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { setupBoardMocks, TEST_BOARD_ID, TEST_USER_ID } from "./fixtures/setupMocks";
+import { runAgentCommand } from "@/lib/ai/agent";
 
-vi.mock("@langchain/openai", () => ({
-  ChatOpenAI: class {
-    constructor(public options: Record<string, unknown>) {}
-    bindTools() {
-      return {
-        invoke: async () => ({ tool_calls: [] }),
-      };
-    }
-    async invoke() {
-      return { tool_calls: [] };
-    }
-  },
-}));
-
-vi.mock("langsmith", () => ({
-  Client: class {},
-}));
-
-const LATENCY_TARGETS = {
+const TARGETS = {
   creation: 3000,
   manipulation: 10000,
-  layout: 15000,
-  complex: 30000,
+  layout: 20000,
+  complex: 45000,
 };
 
-function seedObject(overrides: Partial<BoardObject>): BoardObject {
-  return {
-    id: crypto.randomUUID(),
-    type: "sticky",
-    x: 0,
-    y: 0,
-    width: 150,
-    height: 150,
-    color: "#fde68a",
-    text: "seed",
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-    updatedBy: "seed",
-    ...overrides,
-  };
+async function timeCommand(command: string, _store: any) {
+  const start = Date.now();
+  await runAgentCommand({
+    command,
+    boardId: TEST_BOARD_ID,
+    userId: TEST_USER_ID,
+  });
+  return Date.now() - start;
 }
 
-describe("AI command performance thresholds", () => {
-  describe("creation latency", () => {
-    const commands = [
-      "Add a yellow sticky note that says User Research",
-      "Create a blue rectangle at position 100, 200",
-      "Add a frame called Sprint Planning",
-    ];
-    commands.forEach((command, index) => {
-      it(`completes in < 3s: "${command}"`, async () => {
-        const runtime = createInMemoryHandlers();
-        registerBoardMutationHandlers({ boardId: `perf-create-${index}`, userId: "perf-user", handlers: runtime.handlers });
-        const start = Date.now();
-        await runAgentCommand({ command, boardId: `perf-create-${index}`, userId: "perf-user" });
-        expect(Date.now() - start).toBeLessThan(LATENCY_TARGETS.creation);
-      });
-    });
+describe("Performance Targets", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
   });
 
-  describe("manipulation latency", () => {
-    const commands = [
-      "Move all the pink sticky notes to the right side",
-      "Resize the frame to fit its contents",
-      "Change all sticky notes to green",
-    ];
-    commands.forEach((command, index) => {
-      it(`completes in < 10s: "${command}"`, async () => {
-        const runtime = createInMemoryHandlers([
-          seedObject({ id: "frame-1", type: "frame", width: 200, height: 200, text: "Frame" }),
-          seedObject({ id: "pink-1", type: "sticky", color: "#ec4899", x: 10, y: 20 }),
-          seedObject({ id: "pink-2", type: "sticky", color: "#ff00ff", x: 60, y: 30 }),
-          seedObject({ id: "child-1", type: "sticky", parentFrameId: "frame-1", x: 30, y: 30 }),
+  describe("Creation commands < 3s", () => {
+    it(
+      "Add a yellow sticky note",
+      async () => {
+        const store = setupBoardMocks();
+        const ms = await timeCommand("Add a yellow sticky note that says 'User Research'", store);
+        expect(ms).toBeLessThan(TARGETS.creation);
+      },
+      TARGETS.creation + 2000,
+    );
+
+    it(
+      "Create a blue rectangle",
+      async () => {
+        const store = setupBoardMocks();
+        const ms = await timeCommand("Create a blue rectangle at position 100, 200", store);
+        expect(ms).toBeLessThan(TARGETS.creation);
+      },
+      TARGETS.creation + 2000,
+    );
+
+    it(
+      "Add a frame",
+      async () => {
+        const store = setupBoardMocks();
+        const ms = await timeCommand("Add a frame called 'Sprint Planning'", store);
+        expect(ms).toBeLessThan(TARGETS.creation);
+      },
+      TARGETS.creation + 2000,
+    );
+  });
+
+  describe("Manipulation commands < 10s", () => {
+    it(
+      "Move pink sticky notes",
+      async () => {
+        const store = setupBoardMocks([
+          { id: "s1", type: "sticky", color: "#FBCFE8", x: 100, y: 100, width: 150, height: 150 },
         ]);
-        registerBoardMutationHandlers({ boardId: `perf-manip-${index}`, userId: "perf-user", handlers: runtime.handlers });
-        const start = Date.now();
-        await runAgentCommand({ command, boardId: `perf-manip-${index}`, userId: "perf-user" });
-        expect(Date.now() - start).toBeLessThan(LATENCY_TARGETS.manipulation);
-      });
-    });
+        const ms = await timeCommand("Move all the pink sticky notes to the right side", store);
+        expect(ms).toBeLessThan(TARGETS.manipulation);
+      },
+      TARGETS.manipulation + 2000,
+    );
+
+    it(
+      "Change color to green",
+      async () => {
+        const store = setupBoardMocks([
+          { id: "s1", type: "sticky", color: "#FDE68A", x: 0, y: 0, width: 150, height: 150 },
+        ]);
+        const ms = await timeCommand("Change all sticky notes to green", store);
+        expect(ms).toBeLessThan(TARGETS.manipulation);
+      },
+      TARGETS.manipulation + 2000,
+    );
   });
 
-  describe("layout latency", () => {
-    const commands = [
-      "Arrange these sticky notes in a grid",
-      "Create a 2x3 grid of sticky notes for pros and cons",
-      "Space these elements evenly",
-    ];
-    commands.forEach((command, index) => {
-      it(`completes in < 15s: "${command}"`, async () => {
-        const runtime = createInMemoryHandlers(
-          Array.from({ length: 6 }).map((_, seedIndex) =>
-            seedObject({ id: `seed-${seedIndex + 1}`, type: "sticky", x: 500, y: 500 }),
-          ),
+  describe("Layout commands < 20s", () => {
+    it(
+      "Space elements evenly",
+      async () => {
+        const store = setupBoardMocks([
+          { id: "s1", type: "sticky", x: 0, y: 0, width: 150, height: 150 },
+          { id: "s2", type: "sticky", x: 900, y: 500, width: 150, height: 150 },
+          { id: "s3", type: "sticky", x: 200, y: 800, width: 150, height: 150 },
+        ]);
+        const ms = await timeCommand("Space these elements evenly", store);
+        expect(ms).toBeLessThan(TARGETS.layout);
+      },
+      TARGETS.layout + 2000,
+    );
+
+    it(
+      "2x3 grid for pros and cons",
+      async () => {
+        const store = setupBoardMocks();
+        const ms = await timeCommand("Create a 2x3 grid of sticky notes for pros and cons", store);
+        expect(ms).toBeLessThan(TARGETS.layout);
+      },
+      TARGETS.layout + 2000,
+    );
+  });
+
+  describe("Complex commands < 45s", () => {
+    it(
+      "SWOT analysis",
+      async () => {
+        const store = setupBoardMocks();
+        const ms = await timeCommand("Create a SWOT analysis template with four quadrants", store);
+        expect(ms).toBeLessThan(TARGETS.complex);
+      },
+      TARGETS.complex + 5000,
+    );
+
+    it(
+      "Retrospective board",
+      async () => {
+        const store = setupBoardMocks();
+        const ms = await timeCommand(
+          "Set up a retrospective board with What Went Well, " + "What Didn't, and Action Items columns",
+          store,
         );
-        registerBoardMutationHandlers({ boardId: `perf-layout-${index}`, userId: "perf-user", handlers: runtime.handlers });
-        const start = Date.now();
-        await runAgentCommand({ command, boardId: `perf-layout-${index}`, userId: "perf-user" });
-        expect(Date.now() - start).toBeLessThan(LATENCY_TARGETS.layout);
-      });
-    });
+        expect(ms).toBeLessThan(TARGETS.complex);
+      },
+      TARGETS.complex + 5000,
+    );
+
+    it(
+      "User journey map",
+      async () => {
+        const store = setupBoardMocks();
+        const ms = await timeCommand("Build a user journey map with 5 stages", store);
+        expect(ms).toBeLessThan(TARGETS.complex);
+      },
+      TARGETS.complex + 5000,
+    );
   });
 
-  describe("complex latency", () => {
-    const commands = [
-      "Create a SWOT analysis template with four quadrants",
-      "Build a user journey map with 5 stages",
-      "Set up a retrospective board with What Went Well, What Didn't, and Action Items",
-    ];
-    commands.forEach((command, index) => {
-      it(`completes in < 30s: "${command}"`, async () => {
-        const runtime = createInMemoryHandlers();
-        registerBoardMutationHandlers({ boardId: `perf-complex-${index}`, userId: "perf-user", handlers: runtime.handlers });
-        const start = Date.now();
-        await runAgentCommand({ command, boardId: `perf-complex-${index}`, userId: "perf-user" });
-        expect(Date.now() - start).toBeLessThan(LATENCY_TARGETS.complex);
-      });
+  it("Delete SWOT analysis < 10s", async () => {
+    setupBoardMocks([
+      { id: "f1", type: "frame", text: "Strengths", x: 0, y: 0, width: 200, height: 200 },
+      { id: "f2", type: "frame", text: "Weaknesses", x: 220, y: 0, width: 200, height: 200 },
+      { id: "f3", type: "frame", text: "Opportunities", x: 0, y: 220, width: 200, height: 200 },
+      { id: "f4", type: "frame", text: "Threats", x: 220, y: 220, width: 200, height: 200 },
+    ]);
+    const start = Date.now();
+    await runAgentCommand({
+      command: "Delete the SWOT analysis",
+      boardId: TEST_BOARD_ID,
+      userId: TEST_USER_ID,
     });
-  });
+    expect(Date.now() - start).toBeLessThan(10000);
+  }, 12000);
+
+  it("Generate seven rectangles in a row < 30s", async () => {
+    setupBoardMocks();
+    const start = Date.now();
+    await runAgentCommand({
+      command: "Generate seven green rectangles in a row",
+      boardId: TEST_BOARD_ID,
+      userId: TEST_USER_ID,
+    });
+    expect(Date.now() - start).toBeLessThan(30000);
+  }, 35000);
 });

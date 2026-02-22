@@ -124,7 +124,7 @@ export async function GET(request: Request) {
     return NextResponse.json(emptyMetrics());
   }
 
-  const projectName = process.env.LANGSMITH_PROJECT ?? "collabboard";
+  const projectName = process.env.LANGSMITH_PROJECT ?? "bend";
   const { searchParams } = new URL(request.url);
   const hoursRaw = Number(searchParams.get("hours") ?? DEFAULT_HOURS);
   const hours = Number.isFinite(hoursRaw) && hoursRaw > 0 ? hoursRaw : DEFAULT_HOURS;

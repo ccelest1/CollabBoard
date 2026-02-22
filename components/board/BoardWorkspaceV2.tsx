@@ -7,7 +7,9 @@ import { createClient } from "@/lib/supabase/client";
 import ContextMenu from "@/components/ContextMenu";
 import ConnectionPointModal from "@/components/ConnectionPointModal";
 import { AIAgentPanel } from "@/components/board/AIAgentPanel";
-import { getBoards, markBoardVisited, sanitizeBoardId } from "@/lib/boards/store";
+import { VersionHistoryPanel } from "@/components/board/VersionHistoryPanel";
+import { ColorPicker } from "@/components/ui/ColorPicker";
+import { deleteOwnedBoard, getBoards, markBoardVisited, renameOwnedBoard, sanitizeBoardId } from "@/lib/boards/store";
 import {
   createBoardObject,
   createBoardObjectId,
@@ -30,6 +32,7 @@ import {
   type BoardRealtimeEvent,
 } from "@/lib/supabase/boardRealtime";
 import { loadPersistedBoardSnapshot, savePersistedBoardSnapshot } from "@/lib/supabase/boardStateStore";
+import { recordChange } from "@/lib/supabase/versionHistory";
 
 type BoardWorkspaceProps = {
   boardId: string;
@@ -179,7 +182,7 @@ type DragConstraintGuide = {
 
 declare global {
   interface Window {
-    __collabboardPerf?: {
+    __bendPerf?: {
       seedObjects: (count: number) => number;
       clearObjects: () => void;
       setMockCollaborators: (count: number) => number;
@@ -205,7 +208,25 @@ const MAX_TEXT_FONT_SIZE = 72;
 const MIN_FRAME_SIZE = 80;
 const CONNECTION_POINT_RADIUS_PX = 6;
 const LINE_SNAP_RADIUS_PX = 22;
-const COLOR_PALETTE = ["#0f172a", "#ef4444", "#f59e0b", "#84cc16", "#22c55e", "#06b6d4", "#3b82f6", "#a855f7"];
+const COLOR_PALETTE = ["#F9C74F", "#F4A0C0", "#74B3F0", "#57CC99", "#F9844A"];
+const TEXT_COLOR_PALETTE = ["#1A1A1A", "#FFFFFF", "#6B7280", "#1D4ED8", "#DC2626"];
+const SWATCH_LABELS: Record<string, string> = {
+  "#FDE68A": "Yellow",
+  "#FBCFE8": "Pink",
+  "#BFDBFE": "Blue",
+  "#BBF7D0": "Green",
+  "#FED7AA": "Orange",
+  "#F9C74F": "Yellow",
+  "#F4A0C0": "Pink",
+  "#74B3F0": "Blue",
+  "#57CC99": "Green",
+  "#F9844A": "Orange",
+  "#1A1A1A": "Black",
+  "#FFFFFF": "White",
+  "#6B7280": "Grey",
+  "#1D4ED8": "Blue",
+  "#DC2626": "Red",
+};
 const INITIAL_BOARD_STATE: BoardStateNormalized = { order: [], objects: {} };
 const RESIZE_HANDLE_SIZE_PX = 10;
 const CONNECTOR_DOT_SIZE_PX = 10;
@@ -239,11 +260,45 @@ function colorFromUserId(userId: string) {
   return colors[Math.abs(hash) % colors.length];
 }
 
+function normalizeHexColor(color: string | undefined) {
+  if (!color) return "#BFDBFE";
+  const match = color.trim().match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (!match) return "#BFDBFE";
+  const hex = match[1];
+  if (hex.length === 3) {
+    return `#${hex
+      .split("")
+      .map((part) => `${part}${part}`)
+      .join("")
+      .toUpperCase()}`;
+  }
+  return `#${hex.toUpperCase()}`;
+}
+
+function objectTypeLabel(type: BoardObjectType) {
+  switch (type) {
+    case "sticky":
+      return "sticky note";
+    case "rectangle":
+      return "rectangle";
+    case "circle":
+      return "circle";
+    case "line":
+      return "connector";
+    case "text":
+      return "text object";
+    case "frame":
+      return "frame";
+    default:
+      return "object";
+  }
+}
+
 function readBoardNameFromCatalog(boardId: string) {
   if (typeof window === "undefined") return "";
   const cleanId = sanitizeBoardId(boardId);
   try {
-    const raw = window.localStorage.getItem("collabboard.boardCatalog.v1");
+    const raw = window.localStorage.getItem("bend.boardCatalog.v1");
     if (!raw) return "";
     const parsed = JSON.parse(raw) as Record<string, { name?: string }>;
     const value = parsed?.[cleanId]?.name;
@@ -260,8 +315,9 @@ function clampTextFontSize(value: number) {
 export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceProps) {
   const router = useRouter();
   const supabase = useMemo(() => createClient(), []);
-  const isBoardverse = boardId.toUpperCase() === "BOARDVERSE";
-  const defaultBoardName = isBoardverse ? "BOARDVERSE" : "Untitled Board";
+  const normalizedBoardId = useMemo(() => sanitizeBoardId(boardId), [boardId]);
+  const isBendverse = boardId.toUpperCase() === "BENDVERSE";
+  const defaultBoardName = isBendverse ? "BENDVERSE" : "Untitled Board";
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const contextRef = useRef<CanvasRenderingContext2D | null>(null);
   const sizeRef = useRef({ width: 0, height: 0, pixelRatio: 1 });
@@ -287,7 +343,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
   const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>([]);
   const [lastRemoteCursorLatencyMs, setLastRemoteCursorLatencyMs] = useState<number | null>(null);
   const [lastRemoteObjectLatencyMs, setLastRemoteObjectLatencyMs] = useState<number | null>(null);
-  const [boardName, setBoardName] = useState(isBoardverse ? "BOARDVERSE" : "");
+  const [boardName, setBoardName] = useState(isBendverse ? "BENDVERSE" : "");
   const [marqueeSelection, setMarqueeSelection] = useState<MarqueeSelection | null>(null);
   const [inlineTextEdit, setInlineTextEdit] = useState<{ id: string; value: string } | null>(null);
   const [connectDraft, setConnectDraft] = useState<ConnectSnapshot | null>(null);
@@ -333,6 +389,8 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
   const previousToolBeforeSpaceRef = useRef<ToolId>("cursor");
   const lastEphemeralObjectBroadcastAtRef = useRef<Record<string, number>>({});
   const lastSnapshotRequestAtRef = useRef(0);
+  const historyDropdownRef = useRef<HTMLDivElement | null>(null);
+  const overflowMenuRef = useRef<HTMLDivElement | null>(null);
 
   const userColor = colorFromUserId(userId || "user");
   const debugLog = (...args: unknown[]) => {
@@ -431,7 +489,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
         context.setLineDash([8 / nextViewport.zoom, 6 / nextViewport.zoom]);
         context.strokeRect(-object.width / 2, -object.height / 2, object.width, object.height);
         context.setLineDash([]);
-        context.fillStyle = "#334155";
+        context.fillStyle = object.textColor ?? "#334155";
         context.font = `${Math.max(11, 12 / Math.max(nextViewport.zoom, 0.8))}px Arial, sans-serif`;
         context.textBaseline = "top";
         context.fillText(object.text?.trim() || "Frame", -object.width / 2 + 8, -object.height / 2 + 6);
@@ -441,7 +499,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
         context.fillStyle = object.color;
         context.fillRect(-object.width / 2, -object.height / 2, object.width, object.height);
         context.strokeRect(-object.width / 2, -object.height / 2, object.width, object.height);
-        context.fillStyle = "#0f172a";
+        context.fillStyle = object.textColor ?? "#0f172a";
         context.font = `${Math.max(12, 16 / Math.max(nextViewport.zoom, 0.8))}px sans-serif`;
         context.textBaseline = "top";
         if (object.text) {
@@ -624,11 +682,11 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
 
     refreshBoardName();
     window.addEventListener("focus", refreshBoardName);
-    window.addEventListener("collabboard:boards-updated", refreshBoardName);
+    window.addEventListener("bend:boards-updated", refreshBoardName);
     window.addEventListener("storage", refreshBoardName);
     return () => {
       window.removeEventListener("focus", refreshBoardName);
-      window.removeEventListener("collabboard:boards-updated", refreshBoardName);
+      window.removeEventListener("bend:boards-updated", refreshBoardName);
       window.removeEventListener("storage", refreshBoardName);
     };
   }, [boardId, userId]);
@@ -639,7 +697,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
     const resolvedName = (nextBoardName ?? boardNameRef.current ?? "").trim();
     const boardNameToPersist = resolvedName && resolvedName !== "Untitled Board" ? resolvedName : undefined;
     persistTimerRef.current = window.setTimeout(() => {
-      void savePersistedBoardSnapshot(supabase, boardId, {
+      void savePersistedBoardSnapshot(supabase, normalizedBoardId, {
         objects: snapshot,
         boardName: boardNameToPersist,
       });
@@ -650,7 +708,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const snapshot = await loadPersistedBoardSnapshot(supabase, boardId);
+      const snapshot = await loadPersistedBoardSnapshot(supabase, normalizedBoardId);
       if (cancelled) return;
       isLoadedFromStoreRef.current = true;
       setBoardState(normalizeBoardObjects(snapshot.objects));
@@ -665,7 +723,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
         persistTimerRef.current = null;
       }
     };
-  }, [boardId, supabase]);
+  }, [normalizedBoardId, supabase]);
 
   const applyRemoteEvent = (event: BoardRealtimeEvent) => {
     if (event.type === "snapshot_request") {
@@ -1319,7 +1377,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
       };
       next.push(cloned);
     }
-    if (next.length === 0) return;
+    if (next.length === 0) return [] as BoardObject[];
     setBoardState((current) => {
       let state = current;
       for (const item of next) {
@@ -1332,6 +1390,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
     for (const item of next) {
       broadcastUpsert(item, false);
     }
+    return next;
   };
 
   const handleCopy = () => {
@@ -1349,6 +1408,9 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
   const handleDelete = () => {
     const ids = [...selectedIdsRef.current];
     if (ids.length === 0) return;
+    const deletedObjects = ids
+      .map((id) => boardStateRef.current.objects[id])
+      .filter((value): value is BoardObject => Boolean(value));
     if (ids.length === 1) {
       const maybeFrame = boardStateRef.current.objects[ids[0]];
       if (maybeFrame?.type === "frame") {
@@ -1362,6 +1424,9 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
       }
     }
     removeLocalObjectsById(ids, true);
+    for (const object of deletedObjects) {
+      appendBoardHistory(`Deleted a ${objectTypeLabel(object.type)}`, [object.id]);
+    }
     if (process.env.NODE_ENV !== "production") {
       console.log("🗑️ Deleted", ids.length, "object(s)");
     }
@@ -1400,12 +1465,19 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
     }
 
     removeLocalObjectsById([frameDeletePrompt.frameId], true);
+    appendBoardHistory(`Deleted a ${objectTypeLabel(frame.type)}`, [frame.id]);
     setFrameDeletePrompt(null);
   };
 
   const handleDeleteFrameAndContents = () => {
     if (!frameDeletePrompt) return;
+    const deletedObjects = [frameDeletePrompt.frameId, ...frameDeletePrompt.childIds]
+      .map((id) => boardStateRef.current.objects[id])
+      .filter((value): value is BoardObject => Boolean(value));
     removeLocalObjectsById([frameDeletePrompt.frameId, ...frameDeletePrompt.childIds], true);
+    for (const object of deletedObjects) {
+      appendBoardHistory(`Deleted a ${objectTypeLabel(object.type)}`, [object.id]);
+    }
     setFrameDeletePrompt(null);
   };
 
@@ -1413,7 +1485,13 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
     const ids = [...selectedIdsRef.current];
     if (ids.length === 0) return;
     handleCopy();
+    const cutObjects = ids
+      .map((id) => boardStateRef.current.objects[id])
+      .filter((value): value is BoardObject => Boolean(value));
     removeLocalObjectsById(ids, true);
+    for (const object of cutObjects) {
+      appendBoardHistory(`Deleted a ${objectTypeLabel(object.type)}`, [object.id]);
+    }
     if (process.env.NODE_ENV !== "production") {
       console.log("✂️ Cut", ids.length, "object(s)");
     }
@@ -1455,6 +1533,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
     selectedIdsRef.current = pasted.map((item) => item.id);
     for (const item of pasted) {
       broadcastUpsert(item, false);
+      appendBoardHistory(`Added a ${objectTypeLabel(item.type)}`, [item.id]);
     }
     if (process.env.NODE_ENV !== "production") {
       console.log("📌 Pasted", pasted.length, "object(s) at cursor position");
@@ -1464,7 +1543,10 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
   const handleDuplicate = () => {
     const ids = [...selectedIdsRef.current];
     if (ids.length === 0) return;
-    duplicateObjects(ids, 20);
+    const duplicatedObjects = duplicateObjects(ids, 20);
+    for (const object of duplicatedObjects) {
+      appendBoardHistory(`Added a ${objectTypeLabel(object.type)}`, [object.id]);
+    }
     if (process.env.NODE_ENV !== "production") {
       console.log("🔄 Duplicated", ids.length, "object(s)");
     }
@@ -1500,6 +1582,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
     };
     upsertLocalObject(line, { broadcast: true });
     setSelectedObjectIds([line.id]);
+    appendBoardHistory(`Added a ${objectTypeLabel(line.type)}`, [line.id]);
   };
 
   const resetLineCreationMode = () => {
@@ -1665,6 +1748,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
       },
       { broadcast: true },
     );
+    appendBoardHistory(`Edited text on ${objectTypeLabel(object.type)}`, [object.id]);
     setInlineTextEdit(null);
   };
 
@@ -1763,6 +1847,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
         const created = createBoardObject(activeTool, point, userId);
         upsertLocalObject(created, { broadcast: true });
         setSelectedObjectIds([created.id]);
+        appendBoardHistory(`Added a ${objectTypeLabel(created.type)}`, [created.id]);
         setInlineTextEdit({ id: created.id, value: created.text ?? "Text" });
         setActiveTool("cursor");
         return;
@@ -1771,6 +1856,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
       const created = createBoardObject(activeTool, point, userId);
       upsertLocalObject(created, { broadcast: true });
       setSelectedObjectIds([created.id]);
+      appendBoardHistory(`Added a ${objectTypeLabel(created.type)}`, [created.id]);
       // Shape and text tools are single-shot: create once, then return to selection.
       setActiveTool("cursor");
     }
@@ -1994,8 +2080,15 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
   };
 
   const finalizePointerInteraction = (source: "canvas" | "resize-handle") => {
-    const wasResizing = Boolean(resizeRef.current);
+    const resizeSnapshot = resizeRef.current;
+    const wasResizing = Boolean(resizeSnapshot);
     stopDragging();
+    if (resizeSnapshot?.id) {
+      const resized = boardStateRef.current.objects[resizeSnapshot.id];
+      if (resized) {
+        appendBoardHistory(`Resized a ${objectTypeLabel(resized.type)}`, [resized.id]);
+      }
+    }
     if (wasResizing) {
       // Equivalent of discardActiveObject + render for our state-based canvas.
       clearSelectionState({ resetTool: true });
@@ -2033,6 +2126,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
       };
       upsertLocalObject(frame, { broadcast: true });
       setSelectedObjectIds([frame.id]);
+      appendBoardHistory(`Added a ${objectTypeLabel(frame.type)}`, [frame.id]);
       setFrameDraft(null);
       setActiveTool("cursor");
       finalizePointerInteraction("canvas");
@@ -2080,6 +2174,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
         const moved = boardStateRef.current.objects[id];
         if (!moved) continue;
         broadcastUpsert(moved, false);
+        appendBoardHistory(`Moved a ${objectTypeLabel(moved.type)}`, [moved.id]);
       }
     }
 
@@ -2153,10 +2248,10 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
     const height = sizeRef.current.height || window.innerHeight;
     if (width <= 0 || height <= 0) return;
 
-    const paddedWidth = Math.max(1, boundingBox.width * 1.4);
-    const paddedHeight = Math.max(1, boundingBox.height * 1.4);
+    const paddedWidth = Math.max(1, boundingBox.width * 1.15);
+    const paddedHeight = Math.max(1, boundingBox.height * 1.15);
     const fitZoom = Math.min(width / paddedWidth, height / paddedHeight);
-    const nextZoom = Math.min(1.5, Math.max(0.75, fitZoom));
+    const nextZoom = Math.min(1, Math.max(0.5, fitZoom));
     const centerX = boundingBox.x + boundingBox.width / 2;
     const centerY = boundingBox.y + boundingBox.height / 2;
 
@@ -2198,11 +2293,97 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
     }
   };
 
+  const handleCopyShareLink = async () => {
+    const shareUrl = `${window.location.origin}/board/${encodeURIComponent(normalizedBoardId)}`;
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      setShareCopied(true);
+      window.setTimeout(() => setShareCopied(false), 1500);
+    } catch {
+      setShareCopied(false);
+    }
+  };
+
+  const handleSaveBoardSettings = () => {
+    const next = boardNameDraft.trim();
+    if (!next) return;
+    renameOwnedBoard(normalizedBoardId, next, userId);
+    setBoardName(next);
+    schedulePersistence(boardStateRef.current, next);
+    setShowBoardSettingsModal(false);
+  };
+
+  const handleRequestAccess = () => {
+    const subject = encodeURIComponent(`Access request for board ${normalizedBoardId}`);
+    const body = encodeURIComponent(`Hi,\n\nPlease review my access for board ${normalizedBoardId}.\n\nThanks.`);
+    window.location.href = `mailto:support@bend.app?subject=${subject}&body=${body}`;
+  };
+
+  const handleDeleteBoard = () => {
+    const confirmed = window.confirm("Delete this board? This cannot be undone.");
+    if (!confirmed) return;
+    deleteOwnedBoard(normalizedBoardId, userId);
+    router.push("/dashboard");
+  };
+
+  const toggleHistoryPanel = () => {
+    setShowVersionHistory((current) => {
+      const next = !current;
+      setOpenPanel(next ? "history" : null);
+      return next;
+    });
+  };
+
+
+  const colorSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const textColorSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [previewColor, setPreviewColor] = useState("#BFDBFE");
+  const [previewTextColor, setPreviewTextColor] = useState("#1A1A1A");
+  const [activeColorPicker, setActiveColorPicker] = useState<"fill" | "text" | null>(null);
+  const [hoveredSwatch, setHoveredSwatch] = useState<string | null>(null);
+  const [showVersionHistory, setShowVersionHistory] = useState(false);
+  const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
+  const [openPanel, setOpenPanel] = useState<"ai" | "history" | null>(null);
+  const [showShareModal, setShowShareModal] = useState(false);
+  const [shareCopied, setShareCopied] = useState(false);
+  const [showBoardSettingsModal, setShowBoardSettingsModal] = useState(false);
+  const [showOverflowMenu, setShowOverflowMenu] = useState(false);
+  const [showMobileInfoPanel, setShowMobileInfoPanel] = useState(false);
+  const [boardNameDraft, setBoardNameDraft] = useState("");
 
   const selectedObjects = selectedObjectIds
     .map((id) => boardState.objects[id])
     .filter((value): value is BoardObject => Boolean(value));
+  const boardObjectsForAi = boardState.order
+    .map((id) => boardState.objects[id])
+    .filter((value): value is BoardObject => Boolean(value))
+    .map((object) => ({ id: object.id, type: object.type }));
   const hasSelectedColorTarget = selectedObjects.length > 0;
+  const activeSelectionHexColor = normalizeHexColor(selectedObjects[0]?.color);
+  const activeSelectionTextColor = normalizeHexColor(
+    selectedObjects[0]?.textColor ?? (selectedObjects[0]?.type === "text" ? selectedObjects[0]?.color : "#1A1A1A"),
+  );
+
+  useEffect(() => {
+    setPreviewColor(activeSelectionHexColor);
+  }, [activeSelectionHexColor]);
+
+  useEffect(() => {
+    setPreviewTextColor(activeSelectionTextColor);
+  }, [activeSelectionTextColor]);
+
+  useEffect(() => {
+    return () => {
+      if (colorSaveTimeoutRef.current) {
+        clearTimeout(colorSaveTimeoutRef.current);
+        colorSaveTimeoutRef.current = null;
+      }
+      if (textColorSaveTimeoutRef.current) {
+        clearTimeout(textColorSaveTimeoutRef.current);
+        textColorSaveTimeoutRef.current = null;
+      }
+    };
+  }, []);
   const effectiveRemoteCollaborators = { ...remoteCollaborators, ...mockCollaborators };
   const uniqueOtherCollaborators = Array.from(
     Object.values(effectiveRemoteCollaborators).reduce((acc, collaborator) => {
@@ -2232,6 +2413,86 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
   const overflowCollaboratorCount = Math.max(0, allCollaboratorsForDisplay.length - displayedCollaborators.length);
   const totalOnlineCount = allCollaboratorsForDisplay.length;
   const displayBoardName = (boardName || "").trim() || defaultBoardName;
+  const infoPanelContent = (
+    <>
+      {!isBendverse ? (
+        <>
+          <p className="text-sm">Board Id:</p>
+          <div className="mt-1 flex items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0 text-slate-600" aria-hidden="true">
+                <path
+                  d="M9 15L6.5 17.5C4.6 19.4 4.6 22.4 6.5 24.3C8.4 26.2 11.4 26.2 13.3 24.3L17 20.6C18.9 18.7 18.9 15.7 17 13.8C16.5 13.3 15.9 13 15.3 12.8"
+                  transform="translate(0 -3) scale(0.9)"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+                <path
+                  d="M15 9L17.5 6.5C19.4 4.6 22.4 4.6 24.3 6.5C26.2 8.4 26.2 11.4 24.3 13.3L20.6 17C18.7 18.9 15.7 18.9 13.8 17C13.3 16.5 13 15.9 12.8 15.3"
+                  transform="translate(-3 0) scale(0.9)"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              <p className="truncate text-xs text-slate-500">{boardId}</p>
+            </div>
+            <button
+              type="button"
+              onClick={copyBoardId}
+              className="shrink-0 rounded border border-slate-300 px-1.5 py-0.5 text-[10px] text-slate-700 hover:bg-slate-50"
+            >
+              Copy
+            </button>
+          </div>
+        </>
+      ) : null}
+      <p className={`${!isBendverse ? "mt-3" : ""} text-sm`}>Zoom:</p>
+      <p className="mt-1 text-xs text-slate-500">{Math.round(viewport.zoom * 100)}%</p>
+      <div className="mt-4 flex items-center justify-between">
+        <div>
+          <p className="text-sm">Collaborators:</p>
+          <p className="text-xs text-slate-500" data-testid="collaborator-online-count">
+            {totalOnlineCount} online
+          </p>
+        </div>
+        <div className="flex -space-x-2" data-testid="collaborator-avatars">
+          {displayedCollaborators.map((collaborator) => (
+            <span
+              key={collaborator.userId}
+              data-testid={`collaborator-avatar-${collaborator.userId}`}
+              className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-white text-xs font-bold text-white shadow-md"
+              style={{ backgroundColor: collaborator.color }}
+              title={collaborator.label}
+            >
+              {(collaborator.label || "?").trim().charAt(0).toUpperCase() || "?"}
+            </span>
+          ))}
+          {overflowCollaboratorCount > 0 ? (
+            <span
+              data-testid="collaborator-overflow"
+              className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-white bg-slate-400 text-[10px] font-bold text-white shadow-md"
+              title={`${overflowCollaboratorCount} more collaborator(s)`}
+            >
+              +{overflowCollaboratorCount}
+            </span>
+          ) : null}
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={() => router.push("/dashboard")}
+        className="mt-4 w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+      >
+        Back to Dashboard
+      </button>
+    </>
+  );
   const dedupedRemoteCursors = Array.from(
     Object.values(remoteCursors).reduce((acc, cursor) => {
       // Keep only the newest cursor for each remote user to avoid duplicate cursor ghosts.
@@ -2301,13 +2562,55 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
         };
       }),
   );
-  const contextMenuPosition =
-    selectedOverlayItems.length > 0
-      ? {
-          left: selectedOverlayItems[0].left + selectedOverlayItems[0].width + 14,
-          top: Math.max(16, selectedOverlayItems[0].top - 6),
-        }
-      : null;
+  useEffect(() => {
+    if (!hasSelectedColorTarget) {
+      setActiveColorPicker(null);
+      setHoveredSwatch(null);
+    }
+  }, [hasSelectedColorTarget]);
+
+  useEffect(() => {
+    const onDocumentMouseDown = (event: globalThis.MouseEvent) => {
+      if (openPanel !== "history") return;
+      if (historyDropdownRef.current?.contains(event.target as Node)) return;
+      setOpenPanel(null);
+      setShowVersionHistory(false);
+    };
+    document.addEventListener("mousedown", onDocumentMouseDown);
+    return () => {
+      document.removeEventListener("mousedown", onDocumentMouseDown);
+    };
+  }, [openPanel]);
+
+  useEffect(() => {
+    const onDocumentMouseDown = (event: globalThis.MouseEvent) => {
+      if (!showOverflowMenu) return;
+      if (overflowMenuRef.current?.contains(event.target as Node)) return;
+      setShowOverflowMenu(false);
+    };
+    document.addEventListener("mousedown", onDocumentMouseDown);
+    return () => {
+      document.removeEventListener("mousedown", onDocumentMouseDown);
+    };
+  }, [showOverflowMenu]);
+
+  const appendBoardHistory = (action: string, objectIds: string[] = []) => {
+    void (async () => {
+      const snapshot = await loadPersistedBoardSnapshot(supabase, normalizedBoardId);
+      await recordChange(
+        {
+          boardId: normalizedBoardId,
+          userId,
+          userName: userLabel || "User",
+          action,
+          objectIds,
+          boardSnapshot: snapshot,
+        },
+        supabase,
+      );
+    })();
+    setHistoryRefreshKey((current) => current + 1);
+  };
 
   const handleConnectionPointClick = (
     event: PointerEvent<HTMLButtonElement>,
@@ -2409,13 +2712,73 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
         },
         { broadcast: true },
       );
+      appendBoardHistory(`Changed color of ${objectTypeLabel(object.type)}`, [object.id]);
     }
+  };
+
+  const applyTextColorToSelected = (textColor: string) => {
+    const now = Date.now();
+    for (const object of selectedObjects) {
+      upsertLocalObject(
+        {
+          ...object,
+          textColor,
+          updatedAt: now,
+          updatedBy: userId,
+        },
+        { broadcast: true },
+      );
+      appendBoardHistory(`Changed color of ${objectTypeLabel(object.type)}`, [object.id]);
+    }
+  };
+
+  const handleObjectPickerColorChange = (newColor: string) => {
+    const normalized = normalizeHexColor(newColor);
+    setPreviewColor(normalized);
+    if (colorSaveTimeoutRef.current) {
+      clearTimeout(colorSaveTimeoutRef.current);
+    }
+    colorSaveTimeoutRef.current = setTimeout(() => {
+      applyColorToSelected(normalized);
+    }, 300);
+  };
+
+  const handleSwatchColorChange = (newColor: string) => {
+    const normalized = normalizeHexColor(newColor);
+    setPreviewColor(normalized);
+    if (colorSaveTimeoutRef.current) {
+      clearTimeout(colorSaveTimeoutRef.current);
+      colorSaveTimeoutRef.current = null;
+    }
+    applyColorToSelected(normalized);
+  };
+
+  const handleTextPickerColorChange = (newColor: string) => {
+    const normalized = normalizeHexColor(newColor);
+    setPreviewTextColor(normalized);
+    if (textColorSaveTimeoutRef.current) {
+      clearTimeout(textColorSaveTimeoutRef.current);
+    }
+    textColorSaveTimeoutRef.current = setTimeout(() => {
+      applyTextColorToSelected(normalized);
+    }, 300);
+  };
+
+  const handleTextSwatchColorChange = (newColor: string) => {
+    const normalized = normalizeHexColor(newColor);
+    setPreviewTextColor(normalized);
+    if (textColorSaveTimeoutRef.current) {
+      clearTimeout(textColorSaveTimeoutRef.current);
+      textColorSaveTimeoutRef.current = null;
+    }
+    applyTextColorToSelected(normalized);
   };
 
   const handleCanvasDoubleClick = (event: PointerEvent<HTMLCanvasElement>) => {
     const point = worldFromScreen(event.clientX, event.clientY);
     const hit = getObjectAtPoint(point);
     if (!hit) return;
+    setSelectedObjectIds([hit.id]);
     if (hit.type === "frame") {
       const bounds = objectBounds(hit);
       const inLabelArea =
@@ -2427,7 +2790,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
       setInlineTextEdit({ id: hit.id, value: hit.text ?? "Frame" });
       return;
     }
-    if (hit.type !== "sticky" && hit.type !== "text") return;
+    if (hit.type !== "sticky" && hit.type !== "text" && hit.type !== "rectangle" && hit.type !== "circle") return;
     setInlineTextEdit({ id: hit.id, value: hit.text ?? "" });
   };
 
@@ -2575,7 +2938,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
   }, []);
 
   useEffect(() => {
-    window.__collabboardPerf = {
+    window.__bendPerf = {
       seedObjects: (count: number) => {
         const origin = {
           x: -viewportRef.current.x / viewportRef.current.zoom + 50,
@@ -2629,7 +2992,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
       }),
     };
     return () => {
-      if (window.__collabboardPerf) delete window.__collabboardPerf;
+      if (window.__bendPerf) delete window.__bendPerf;
     };
   }, [userId]);
 
@@ -2648,113 +3011,151 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
         onContextMenu={handleCanvasContextMenu}
       />
 
-      <div className="absolute left-5 top-4 rounded-xl border border-slate-400 bg-white px-3 py-2 shadow-sm">
-        <div className="flex items-center gap-4 text-sm">
-          <span className="font-medium">CollabBoard</span>
-          <span className="text-slate-400">|</span>
-          <span>{displayBoardName}</span>
-          <button type="button" className="rounded-md border border-slate-400 px-3 py-1 text-xs hover:bg-slate-50">
-            Options
+      <div className="absolute left-4 top-4 z-50 rounded-xl border border-slate-400 bg-white px-2.5 py-2 shadow-sm md:left-5 md:px-3">
+        <div className="relative flex items-center gap-2 text-sm md:gap-4">
+          <span aria-label="CB" className="block shrink-0 text-2xl font-black leading-none tracking-tight text-slate-900 dark:text-white">
+            <img
+              src="/icons/bend-logo-halftone-arch-dark.png"
+              alt="BEND"
+              className="block dark:hidden"
+              style={{
+                height: 32,
+                width: "auto",
+                objectFit: "contain",
+              }}
+            />
+            <img
+              src="/icons/bend-logo-halftone-arch-light.png"
+              alt="BEND"
+              className="hidden dark:block"
+              style={{
+                height: 32,
+                width: "auto",
+                objectFit: "contain",
+              }}
+            />
+          </span>
+          <span className="hidden text-slate-400 sm:inline">|</span>
+          <span className="max-w-[100px] truncate sm:max-w-none">{displayBoardName}</span>
+          <button
+            type="button"
+            onClick={() => {
+              setBoardNameDraft(displayBoardName);
+              setShowBoardSettingsModal(true);
+            }}
+            className="rounded-md border border-slate-400 px-2 py-1 text-xs hover:bg-slate-50 md:px-3"
+          >
+            <span className="hidden md:inline">Board Settings</span>
+            <span className="md:hidden" aria-hidden="true">
+              ⚙
+            </span>
           </button>
         </div>
       </div>
 
-      <div className="absolute right-5 top-4 rounded-xl border border-slate-400 bg-white px-3 py-2 shadow-sm">
-        <div className="flex items-center gap-3 text-sm">
+      <div className="absolute right-4 top-4 z-50 rounded-xl border border-slate-400 bg-white px-2.5 py-2 shadow-sm md:right-5 md:px-3">
+        <div ref={historyDropdownRef} className="relative flex items-center gap-2 text-sm md:gap-3">
+          <button
+            type="button"
+            onClick={toggleHistoryPanel}
+            className="rounded-md border border-slate-400 px-3 py-1 text-xs hover:bg-slate-50"
+          >
+            History
+          </button>
+          <VersionHistoryPanel
+            boardId={normalizedBoardId}
+            userId={userId}
+            userName={userLabel || "User"}
+            isOpen={openPanel === "history" && showVersionHistory}
+            onClose={() => {
+              setShowVersionHistory(false);
+              setOpenPanel(null);
+            }}
+            refreshKey={historyRefreshKey}
+          />
           <span className="h-10 w-10 rounded-full border border-slate-400" style={{ backgroundColor: userColor }} />
-          <span>{userLabel}</span>
-          <button type="button" className="rounded-md border border-slate-400 px-3 py-1 text-xs hover:bg-slate-50">
-            Request Different Access
+          <span className="hidden md:inline">{userLabel}</span>
+          <button
+            type="button"
+            onClick={() => setShowShareModal(true)}
+            className="hidden rounded-md border border-slate-400 px-3 py-1 text-xs hover:bg-slate-50 md:inline-flex"
+          >
+            Share
           </button>
           <button
             type="button"
             onClick={handleSignOut}
             disabled={signingOut}
-            className="rounded-md border border-slate-400 px-4 py-1.5 text-sm font-medium hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+            className="hidden rounded-md border border-slate-400 px-4 py-1.5 text-sm font-medium hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 md:inline-flex"
           >
             {signingOut ? "Signing out..." : "Sign Out"}
           </button>
-        </div>
-      </div>
-
-      <div className="absolute left-5 top-24 w-44 rounded-xl border border-slate-400 bg-white px-3 py-3 shadow-sm">
-        {!isBoardverse ? (
-          <>
-            <p className="text-sm">Board Id:</p>
-            <div className="mt-1 flex items-center justify-between gap-2">
-              <div className="flex min-w-0 items-center gap-1.5">
-                <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0 text-slate-600" aria-hidden="true">
-                  <path
-                    d="M9 15L6.5 17.5C4.6 19.4 4.6 22.4 6.5 24.3C8.4 26.2 11.4 26.2 13.3 24.3L17 20.6C18.9 18.7 18.9 15.7 17 13.8C16.5 13.3 15.9 13 15.3 12.8"
-                    transform="translate(0 -3) scale(0.9)"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path
-                    d="M15 9L17.5 6.5C19.4 4.6 22.4 4.6 24.3 6.5C26.2 8.4 26.2 11.4 24.3 13.3L20.6 17C18.7 18.9 15.7 18.9 13.8 17C13.3 16.5 13 15.9 12.8 15.3"
-                    transform="translate(-3 0) scale(0.9)"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-                <p className="truncate text-xs text-slate-500">{boardId}</p>
+          <div ref={overflowMenuRef} className="relative md:hidden">
+            <button
+              type="button"
+              onClick={() => setShowOverflowMenu((current) => !current)}
+              className="rounded-md border border-slate-400 px-2 py-1 text-base leading-none hover:bg-slate-50"
+              aria-label="Open overflow menu"
+            >
+              •••
+            </button>
+            {showOverflowMenu ? (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "calc(100% + 4px)",
+                  right: 0,
+                  background: "white",
+                  border: "1px solid #E5E7EB",
+                  borderRadius: 8,
+                  padding: 8,
+                  minWidth: 140,
+                  zIndex: 65,
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowOverflowMenu(false);
+                    setShowShareModal(true);
+                  }}
+                  className="block w-full rounded px-2 py-1.5 text-left text-xs text-slate-700 hover:bg-slate-50"
+                >
+                  Share
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowOverflowMenu(false);
+                    void handleSignOut();
+                  }}
+                  disabled={signingOut}
+                  className="mt-1 block w-full rounded px-2 py-1.5 text-left text-xs text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {signingOut ? "Signing out..." : "Sign Out"}
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={copyBoardId}
-                className="shrink-0 rounded border border-slate-300 px-1.5 py-0.5 text-[10px] text-slate-700 hover:bg-slate-50"
-              >
-                Copy
-              </button>
-            </div>
-          </>
-        ) : null}
-        <p className={`${!isBoardverse ? "mt-3" : ""} text-sm`}>Zoom:</p>
-        <p className="mt-1 text-xs text-slate-500">{Math.round(viewport.zoom * 100)}%</p>
-        <div className="mt-4 flex items-center justify-between">
-          <div>
-            <p className="text-sm">Collaborators:</p>
-            <p className="text-xs text-slate-500" data-testid="collaborator-online-count">
-              {totalOnlineCount} online
-            </p>
-          </div>
-          <div className="flex -space-x-2" data-testid="collaborator-avatars">
-            {displayedCollaborators.map((collaborator) => (
-              <span
-                key={collaborator.userId}
-                data-testid={`collaborator-avatar-${collaborator.userId}`}
-                className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-white text-xs font-bold text-white shadow-md"
-                style={{ backgroundColor: collaborator.color }}
-                title={collaborator.label}
-              >
-                {(collaborator.label || "?").trim().charAt(0).toUpperCase() || "?"}
-              </span>
-            ))}
-            {overflowCollaboratorCount > 0 ? (
-              <span
-                data-testid="collaborator-overflow"
-                className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-white bg-slate-400 text-[10px] font-bold text-white shadow-md"
-                title={`${overflowCollaboratorCount} more collaborator(s)`}
-              >
-                +{overflowCollaboratorCount}
-              </span>
             ) : null}
           </div>
         </div>
-        <button
-          type="button"
-          onClick={() => router.push("/dashboard")}
-          className="mt-4 w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
-        >
-          Back to Dashboard
-        </button>
       </div>
+
+      <div className="absolute left-5 top-24 hidden w-44 rounded-xl border border-slate-400 bg-white px-3 py-3 shadow-sm md:block">
+        {infoPanelContent}
+      </div>
+      <button
+        type="button"
+        onClick={() => setShowMobileInfoPanel((current) => !current)}
+        className="absolute left-4 top-20 z-50 rounded-full border border-slate-300 bg-white px-2.5 py-1.5 text-sm shadow-sm md:hidden"
+        aria-label="Toggle board info"
+      >
+        ⓘ
+      </button>
+      {showMobileInfoPanel ? (
+        <div className="absolute left-4 top-28 z-50 w-52 rounded-xl border border-slate-300 bg-white px-3 py-3 shadow-xl md:hidden">
+          {infoPanelContent}
+        </div>
+      ) : null}
 
       <div className="absolute bottom-6 left-5 rounded-xl border border-slate-400 bg-white p-1 shadow-sm">
         <div className="flex items-center gap-1">
@@ -2775,10 +3176,24 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
         </div>
       </div>
 
-      <AIAgentPanel boardId={boardId} userId={userId} onCommandSuccess={centerViewportOnBoundingBox} />
+      <AIAgentPanel
+        boardId={normalizedBoardId}
+        userId={userId}
+        isOpen={openPanel === "ai"}
+        onOpenChange={(open) => {
+          if (open) {
+            setOpenPanel("ai");
+            setShowVersionHistory(false);
+            return;
+          }
+          setOpenPanel((current) => (current === "ai" ? null : current));
+        }}
+        onCommandSuccess={centerViewportOnBoundingBox}
+        boardObjects={boardObjectsForAi}
+      />
 
-      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 rounded-2xl border border-slate-400 bg-white p-2 shadow-sm">
-        <div className="flex items-center gap-2">
+      <div className="fixed bottom-4 left-1/2 z-50 w-auto max-w-[calc(100vw-32px)] -translate-x-1/2 overflow-x-auto rounded-xl border border-slate-400 bg-white px-2 py-1.5 shadow-[0_4px_16px_rgba(0,0,0,0.1)]">
+        <div className="flex items-center gap-1 whitespace-nowrap">
           {TOOLBAR_ITEMS.map((item) => {
             const isActive = activeTool === item.id;
             return (
@@ -2862,8 +3277,82 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
         </div>
       </div>
 
+      {showShareModal ? (
+        <div className="absolute inset-0 z-[70] flex items-center justify-center bg-black/20">
+          <div className="w-[360px] rounded-xl border border-slate-300 bg-white p-4 shadow-xl">
+            <p className="text-sm font-semibold text-slate-900">Share</p>
+            <p className="mt-2 text-xs text-slate-500">{`${window.location.origin}/board/${normalizedBoardId}`}</p>
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowShareModal(false)}
+                className="rounded-md px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-100"
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                onClick={handleCopyShareLink}
+                className="rounded-md border border-slate-300 px-2.5 py-1.5 text-xs text-slate-700 hover:bg-slate-50"
+              >
+                {shareCopied ? "Copied!" : "Copy link"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {showBoardSettingsModal ? (
+        <div className="absolute inset-0 z-[70] flex items-center justify-center bg-black/20">
+          <div className="w-[420px] rounded-xl border border-slate-300 bg-white p-4 shadow-xl">
+            <p className="text-sm font-semibold text-slate-900">Board Settings</p>
+            <label className="mt-3 block text-xs text-slate-600">Board name</label>
+            <input
+              value={boardNameDraft}
+              onChange={(event) => setBoardNameDraft(event.target.value)}
+              className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-800"
+            />
+            <div className="mt-3">
+              <button
+                type="button"
+                onClick={handleRequestAccess}
+                className="rounded-md border border-slate-300 px-2.5 py-1.5 text-xs text-slate-700 hover:bg-slate-50"
+              >
+                Request different access
+              </button>
+            </div>
+            <div className="mt-5 border-t border-slate-200 pt-3">
+              <p className="text-xs font-medium text-red-600">Danger zone</p>
+              <button
+                type="button"
+                onClick={handleDeleteBoard}
+                className="mt-2 rounded-md border border-red-200 px-2.5 py-1.5 text-xs text-red-700 hover:bg-red-50"
+              >
+                Delete board
+              </button>
+            </div>
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowBoardSettingsModal(false)}
+                className="rounded-md px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-100"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveBoardSettings}
+                className="rounded-md border border-slate-300 px-2.5 py-1.5 text-xs text-slate-700 hover:bg-slate-50"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {showLineTypeModal ? (
-        <div className="absolute bottom-24 left-1/2 z-50 -translate-x-1/2 rounded-xl border border-slate-300 bg-white/95 p-3 shadow-xl transition-opacity duration-150 hover:opacity-45">
+        <div className="absolute bottom-24 left-1/2 z-50 -translate-x-1/2 rounded-xl border border-slate-300 bg-white p-3 shadow-xl">
           <p className="mb-2 text-xs font-medium text-slate-700">Choose line type</p>
           <div className="flex items-center gap-2">
             <button
@@ -2906,7 +3395,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
       ) : null}
 
       {showLineInfo ? (
-        <div className="absolute bottom-24 left-1/2 z-50 w-[28rem] -translate-x-1/2 rounded-xl border border-slate-300 bg-white/95 p-4 shadow-xl transition-opacity duration-150 hover:opacity-45">
+        <div className="absolute bottom-24 left-1/2 z-50 w-[28rem] -translate-x-1/2 rounded-xl border border-slate-300 bg-white p-4 shadow-xl">
           <h2 className="mb-2 text-sm font-semibold text-slate-900">How to create connectors</h2>
           <p className="mb-2 text-xs text-gray-700">
             Click a shape (rectangle, circle, sticky note, text, frame, or existing line) to set a start point, then
@@ -3007,28 +3496,195 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
         />
       ))}
 
-      {contextMenuPosition && hasSelectedColorTarget ? (
+      {hasSelectedColorTarget ? (
         <div
-          className="absolute z-30 rounded-2xl border border-slate-400 bg-white/95 p-2 shadow-sm transition-opacity duration-150 hover:opacity-45"
-          style={{ left: contextMenuPosition.left, top: contextMenuPosition.top }}
+          className="fixed z-[60]"
+          style={{
+            right: 0,
+            top: "50%",
+            transform: "translateY(-50%)",
+            width: 300,
+            background: "#FFFFFF",
+            borderRadius: "12px 0 0 12px",
+            boxShadow: "-4px 0 20px rgba(0,0,0,0.08)",
+            padding: 14,
+          }}
         >
-          <div className="mb-2 flex items-center gap-2">
-            {COLOR_PALETTE.map((color) => (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "row",
+              gap: 12,
+              alignItems: "flex-start",
+            }}
+          >
+            <div style={{ flex: 1 }}>
+              <p style={{ fontSize: 10, color: "#9CA3AF", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                Fill
+              </p>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-start", marginBottom: 10 }}>
+                {COLOR_PALETTE.map((color) => {
+                  const selected = activeSelectionHexColor === color;
+                  const hoverKey = `fill:${color}`;
+                  const label = SWATCH_LABELS[color.toUpperCase()] ?? color;
+                  return (
+                    <div key={color} style={{ position: "relative" }}>
+                      <button
+                        type="button"
+                        aria-label={`Set object color ${color}`}
+                        data-testid={`color-swatch-${color.replace("#", "")}`}
+                        onClick={() => handleSwatchColorChange(color)}
+                        onMouseEnter={() => setHoveredSwatch(hoverKey)}
+                        onMouseLeave={() => setHoveredSwatch(null)}
+                        style={{
+                          width: 22,
+                          height: 22,
+                          borderRadius: "50%",
+                          background: color,
+                          border: selected ? "2.5px solid #1a1a1a" : "2px solid rgba(0,0,0,0.15)",
+                          cursor: "pointer",
+                          padding: 0,
+                          flexShrink: 0,
+                        }}
+                      />
+                      {hoveredSwatch === hoverKey ? (
+                        <div
+                          style={{
+                            position: "absolute",
+                            bottom: "calc(100% + 4px)",
+                            left: "50%",
+                            transform: "translateX(-50%)",
+                            background: "#1a1a1a",
+                            color: "#FFFFFF",
+                            fontSize: 10,
+                            padding: "2px 6px",
+                            borderRadius: 4,
+                            whiteSpace: "nowrap",
+                            pointerEvents: "none",
+                            zIndex: 100,
+                          }}
+                        >
+                          {label}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
               <button
-                key={color}
                 type="button"
-                aria-label={`Set color ${color}`}
-                data-testid={`color-swatch-${color.replace("#", "")}`}
-                className="h-6 w-6 rounded-full border border-slate-300"
-                style={{ backgroundColor: color }}
-                onClick={() => applyColorToSelected(color)}
+                aria-label="Open object color picker"
+                onClick={() => setActiveColorPicker((current) => (current === "fill" ? null : "fill"))}
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: "50%",
+                  background: previewColor,
+                  border: "2px solid rgba(0,0,0,0.15)",
+                  cursor: "pointer",
+                }}
               />
-            ))}
+            </div>
+            <div style={{ width: 1, background: "#F3F4F6", alignSelf: "stretch" }} />
+            <div style={{ flex: 1 }}>
+              <p style={{ fontSize: 10, color: "#9CA3AF", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                Text
+              </p>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-start", marginBottom: 10 }}>
+                {TEXT_COLOR_PALETTE.map((color) => {
+                  const selected = activeSelectionTextColor === color;
+                  const hoverKey = `text:${color}`;
+                  const label = SWATCH_LABELS[color.toUpperCase()] ?? color;
+                  return (
+                    <div key={color} style={{ position: "relative" }}>
+                      <button
+                        type="button"
+                        aria-label={`Set text color ${color}`}
+                        onClick={() => handleTextSwatchColorChange(color)}
+                        onMouseEnter={() => setHoveredSwatch(hoverKey)}
+                        onMouseLeave={() => setHoveredSwatch(null)}
+                        style={{
+                          width: 22,
+                          height: 22,
+                          borderRadius: "50%",
+                          background: color,
+                          border: selected ? "2.5px solid #1a1a1a" : "2px solid rgba(0,0,0,0.15)",
+                          cursor: "pointer",
+                          padding: 0,
+                          flexShrink: 0,
+                        }}
+                      />
+                      {hoveredSwatch === hoverKey ? (
+                        <div
+                          style={{
+                            position: "absolute",
+                            bottom: "calc(100% + 4px)",
+                            left: "50%",
+                            transform: "translateX(-50%)",
+                            background: "#1a1a1a",
+                            color: "#FFFFFF",
+                            fontSize: 10,
+                            padding: "2px 6px",
+                            borderRadius: 4,
+                            whiteSpace: "nowrap",
+                            pointerEvents: "none",
+                            zIndex: 100,
+                          }}
+                        >
+                          {label}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+              <button
+                type="button"
+                aria-label="Open text color picker"
+                onClick={() => setActiveColorPicker((current) => (current === "text" ? null : "text"))}
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: "50%",
+                  background: previewTextColor,
+                  border: "2px solid rgba(0,0,0,0.15)",
+                  cursor: "pointer",
+                }}
+              />
+            </div>
           </div>
+
+          {activeColorPicker ? (
+            <div style={{ marginTop: 12 }}>
+              <ColorPicker
+                currentColor={activeColorPicker === "fill" ? previewColor : previewTextColor}
+                onColorChange={activeColorPicker === "fill" ? handleObjectPickerColorChange : handleTextPickerColorChange}
+              />
+            </div>
+          ) : null}
+
+          <div style={{ borderTop: "1px solid #F3F4F6", margin: "12px 0" }} />
+
           <button
             type="button"
             onClick={handleDuplicate}
-            className="w-full rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
+            style={{
+              width: "100%",
+              height: 32,
+              border: "none",
+              borderRadius: 8,
+              background: "#EEF2FF",
+              color: "#374151",
+              fontSize: 13,
+              fontWeight: 500,
+              cursor: "pointer",
+            }}
+            onMouseEnter={(event) => {
+              event.currentTarget.style.background = "#E0E7FF";
+            }}
+            onMouseLeave={(event) => {
+              event.currentTarget.style.background = "#EEF2FF";
+            }}
           >
             Duplicate
           </button>
@@ -3122,7 +3778,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
         : null}
 
       {frameDeletePrompt ? (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/30 px-4">
+        <div className="absolute inset-0 z-[70] flex items-center justify-center bg-black/30 px-4">
           <div className="w-full max-w-sm rounded-xl border border-slate-300 bg-white p-4 shadow-xl">
             <p className="text-sm font-semibold text-slate-900">Delete Frame</p>
             <p className="mt-1 text-sm text-slate-600">
@@ -3248,7 +3904,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
             style={{
               ...screen,
               backgroundColor: isSticky ? object.color : isFrameLabel ? "rgba(255,255,255,0.95)" : "#ffffff",
-              color: isFrameLabel ? "#334155" : isSticky ? "#0f172a" : object.color,
+              color: isFrameLabel ? object.textColor ?? "#334155" : isSticky ? object.textColor ?? "#0f172a" : object.textColor ?? object.color,
               fontFamily: object.type === "text" || isFrameLabel ? "Arial, sans-serif" : undefined,
               fontSize: isFrameLabel ? "12px" : editorFontSize ? `${editorFontSize}px` : undefined,
               fontWeight: isFrameLabel ? 700 : undefined,

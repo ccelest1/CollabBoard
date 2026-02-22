@@ -5,7 +5,11 @@ import {
   subscribeChannel,
   type BoardRealtimeEvent,
 } from "@/lib/supabase/boardRealtime";
-import { loadPersistedBoardSnapshot, savePersistedBoardSnapshot } from "@/lib/supabase/boardStateStore";
+import {
+  loadPersistedBoardSnapshot,
+  mutatePersistedBoardSnapshot,
+  savePersistedBoardSnapshot,
+} from "@/lib/supabase/boardStateStore";
 import {
   createBoardObject,
   normalizeBoardObjects,
@@ -58,6 +62,14 @@ async function persistAndBroadcastUpsert(
     objects: toSnapshot(state),
     boardName,
   });
+  await verifyPersistedObjectAndBroadcast(supabase, boardId, object);
+}
+
+async function verifyPersistedObjectAndBroadcast(
+  supabase: SupabaseClient,
+  boardId: string,
+  object: BoardObject,
+) {
   await new Promise<void>((resolve) => {
     setTimeout(() => resolve(), 200);
   });
@@ -91,7 +103,6 @@ export function createRealtimeMutationHandlers(params: {
 
   return {
     createStickyNote: async ({ text, x, y, color }) => {
-      const { snapshot, state } = await withCurrentState(supabase, boardId);
       const created = createBoardObject("sticky", { x, y }, userId);
       const nextObject: BoardObject = {
         ...created,
@@ -102,13 +113,19 @@ export function createRealtimeMutationHandlers(params: {
         updatedAt: Date.now(),
         updatedBy: userId,
       };
-      const nextState = upsertBoardObject(state, nextObject);
-      await persistAndBroadcastUpsert(supabase, boardId, nextState, snapshot.boardName, nextObject);
+      await mutatePersistedBoardSnapshot(supabase, boardId, async (current) => {
+        const state = normalizeBoardObjects(current.objects);
+        const nextState = upsertBoardObject(state, nextObject);
+        return {
+          objects: toSnapshot(nextState),
+          boardName: current.boardName,
+        };
+      });
+      await verifyPersistedObjectAndBroadcast(supabase, boardId, nextObject);
       return nextObject;
     },
 
     createShape: async ({ type, x, y, width, height, color }) => {
-      const { snapshot, state } = await withCurrentState(supabase, boardId);
       const created = createBoardObject(type, { x, y }, userId);
       const nextObject: BoardObject = {
         ...created,
@@ -118,13 +135,19 @@ export function createRealtimeMutationHandlers(params: {
         updatedAt: Date.now(),
         updatedBy: userId,
       };
-      const nextState = upsertBoardObject(state, nextObject);
-      await persistAndBroadcastUpsert(supabase, boardId, nextState, snapshot.boardName, nextObject);
+      await mutatePersistedBoardSnapshot(supabase, boardId, async (current) => {
+        const state = normalizeBoardObjects(current.objects);
+        const nextState = upsertBoardObject(state, nextObject);
+        return {
+          objects: toSnapshot(nextState),
+          boardName: current.boardName,
+        };
+      });
+      await verifyPersistedObjectAndBroadcast(supabase, boardId, nextObject);
       return nextObject;
     },
 
     createFrame: async ({ title, x, y, width, height }) => {
-      const { snapshot, state } = await withCurrentState(supabase, boardId);
       const created = createBoardObject("frame", { x, y }, userId);
       const nextObject: BoardObject = {
         ...created,
@@ -134,8 +157,15 @@ export function createRealtimeMutationHandlers(params: {
         updatedAt: Date.now(),
         updatedBy: userId,
       };
-      const nextState = upsertBoardObject(state, nextObject);
-      await persistAndBroadcastUpsert(supabase, boardId, nextState, snapshot.boardName, nextObject);
+      await mutatePersistedBoardSnapshot(supabase, boardId, async (current) => {
+        const state = normalizeBoardObjects(current.objects);
+        const nextState = upsertBoardObject(state, nextObject);
+        return {
+          objects: toSnapshot(nextState),
+          boardName: current.boardName,
+        };
+      });
+      await verifyPersistedObjectAndBroadcast(supabase, boardId, nextObject);
       return nextObject;
     },
 
@@ -240,6 +270,29 @@ export function createRealtimeMutationHandlers(params: {
       const nextState = upsertBoardObject(state, nextObject);
       await persistAndBroadcastUpsert(supabase, boardId, nextState, snapshot.boardName, nextObject);
       return nextObject;
+    },
+
+    deleteObject: async ({ objectId }) => {
+      const { snapshot, state } = await withCurrentState(supabase, boardId);
+      const existing = state.objects[objectId];
+      if (!existing) {
+        return { deleted: false, objectId };
+      }
+      const nextOrder = state.order.filter((id) => id !== objectId);
+      const nextObjects = { ...state.objects };
+      delete nextObjects[objectId];
+      await savePersistedBoardSnapshot(supabase, boardId, {
+        objects: nextOrder.map((id) => nextObjects[id]).filter((value): value is BoardObject => Boolean(value)),
+        boardName: snapshot.boardName,
+      });
+      await broadcastEvent(supabase, boardId, {
+        type: "delete_objects",
+        sessionId: `ai-agent:${userId}`,
+        sentAt: Date.now(),
+        ids: [objectId],
+        updatedAt: Date.now(),
+      });
+      return { deleted: true, objectId };
     },
 
     getBoardObjects: async () => {

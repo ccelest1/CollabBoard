@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { signInIfCredentialsExist } from "../helpers/auth";
 
-test("collaborator avatars include self and cap at 3 with overflow", async ({ page, baseURL }) => {
+test("BEND collaborator avatars include self and cap at 3 with overflow", async ({ page, baseURL }) => {
   const signedIn = await signInIfCredentialsExist(page);
   test.skip(!signedIn, "E2E login credentials are required");
 
@@ -12,14 +12,14 @@ test("collaborator avatars include self and cap at 3 with overflow", async ({ pa
 
   // Scenario 1: only current user.
   await page.evaluate(() => {
-    window.__collabboardPerf?.clearMockCollaborators();
+    window.__bendPerf?.clearMockCollaborators();
   });
   await expect(page.getByTestId("collaborator-online-count")).toContainText("1 online");
   await expect(page.getByTestId("collaborator-avatars").locator("[data-testid^='collaborator-avatar-']")).toHaveCount(1);
 
   // Scenario 2: current user + 1 other.
   await page.evaluate(() => {
-    window.__collabboardPerf?.setMockCollaborators(1);
+    window.__bendPerf?.setMockCollaborators(1);
   });
   await expect(page.getByTestId("collaborator-online-count")).toContainText("2 online");
   await expect(page.getByTestId("collaborator-avatars").locator("[data-testid^='collaborator-avatar-']")).toHaveCount(2);
@@ -27,7 +27,7 @@ test("collaborator avatars include self and cap at 3 with overflow", async ({ pa
 
   // Scenario 3: current user + 2 others.
   await page.evaluate(() => {
-    window.__collabboardPerf?.setMockCollaborators(2);
+    window.__bendPerf?.setMockCollaborators(2);
   });
   await expect(page.getByTestId("collaborator-online-count")).toContainText("3 online");
   await expect(page.getByTestId("collaborator-avatars").locator("[data-testid^='collaborator-avatar-']")).toHaveCount(3);
@@ -35,7 +35,7 @@ test("collaborator avatars include self and cap at 3 with overflow", async ({ pa
 
   // Scenario 4: current user + 4 others.
   await page.evaluate(() => {
-    window.__collabboardPerf?.setMockCollaborators(4);
+    window.__bendPerf?.setMockCollaborators(4);
   });
   await expect(page.getByTestId("collaborator-online-count")).toContainText("5 online");
   await expect(page.getByTestId("collaborator-avatars").locator("[data-testid^='collaborator-avatar-']")).toHaveCount(3);
@@ -53,7 +53,7 @@ test("collaborator avatars include self and cap at 3 with overflow", async ({ pa
   expect(new Set(colors).size).toBeGreaterThanOrEqual(2);
 
   await page.evaluate(() => {
-    window.__collabboardPerf?.clearMockCollaborators();
+    window.__bendPerf?.clearMockCollaborators();
   });
 });
 

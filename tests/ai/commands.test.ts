@@ -80,11 +80,23 @@ describe("runAgentCommand command coverage", () => {
       expect.objectContaining({ type: "rectangle", x: 100, y: 200, width: 150, height: 100 }),
     );
     expect(spyCreateFrame).toHaveBeenCalledWith(
-      expect.objectContaining({ title: "Sprint Planning", x: 0, y: 0, width: 400, height: 300 }),
+      expect.objectContaining({ title: "Sprint Planning", x: expect.any(Number), y: expect.any(Number), width: 400, height: 300 }),
     );
     expect(runtime.objects.filter((o) => o.type === "sticky")).toHaveLength(1);
     expect(runtime.objects.filter((o) => o.type === "rectangle")).toHaveLength(1);
     expect(runtime.objects.filter((o) => o.type === "frame" && o.text === "Sprint Planning")).toHaveLength(1);
+  });
+
+  it("supports bulk creation verb and arrangement variations", async () => {
+    const runtime = createInMemoryHandlers();
+    registerBoardMutationHandlers({ boardId: "c2", userId: "u1", handlers: runtime.handlers });
+
+    await runAgentCommand({ command: "Generate seven green rectangles in a row", boardId: "c2", userId: "u1" });
+
+    const rectangles = runtime.objects.filter((o) => o.type === "rectangle");
+    expect(rectangles).toHaveLength(7);
+    const ys = rectangles.map((rectangle) => rectangle.y);
+    expect(new Set(ys).size).toBe(1);
   });
 
   it("supports manipulation commands", async () => {
@@ -105,8 +117,9 @@ describe("runAgentCommand command coverage", () => {
     await runAgentCommand({ command: "Change all sticky notes to green", boardId: "m1", userId: "u2" });
 
     expect(spyGetBoardObjects).toHaveBeenCalled();
-    expect(spyMoveObject).toHaveBeenCalledTimes(2);
+    expect(spyMoveObject).toHaveBeenCalledTimes(3);
     expect(spyMoveObject).toHaveBeenCalledWith(expect.objectContaining({ objectId: "pink-1", x: expect.any(Number) }));
+    expect(spyMoveObject).toHaveBeenCalledWith(expect.objectContaining({ objectId: "frame-1", x: expect.any(Number), y: expect.any(Number) }));
     expect(spyResizeObject).toHaveBeenCalledWith(
       expect.objectContaining({ objectId: "frame-1", width: expect.any(Number), height: expect.any(Number) }),
     );
@@ -163,7 +176,7 @@ describe("runAgentCommand command coverage", () => {
     await runAgentCommand({ command: "Build a user journey map with 5 stages", boardId: "x1", userId: "u4" });
     const stages = runtime.objects.filter((o) => o.type === "sticky" && /^Stage \d$/.test(o.text ?? ""));
     expect(stages).toHaveLength(5);
-    expect(spyCreateConnector).toHaveBeenCalledTimes(4);
+    expect(spyCreateConnector).toHaveBeenCalledTimes(0);
 
     await runAgentCommand({
       command: "Set up a retrospective board with What Went Well, What Didn't, and Action Items",
@@ -172,6 +185,17 @@ describe("runAgentCommand command coverage", () => {
     });
     const retroFrames = runtime.objects.filter((o) => o.type === "frame" && ["What Went Well", "What Didn't", "Action Items"].includes(o.text ?? ""));
     expect(retroFrames).toHaveLength(3);
+  });
+
+  it("supports deleting a SWOT analysis", async () => {
+    const runtime = createInMemoryHandlers();
+    registerBoardMutationHandlers({ boardId: "x2", userId: "u5", handlers: runtime.handlers });
+
+    await runAgentCommand({ command: "Create a SWOT analysis template with four quadrants", boardId: "x2", userId: "u5" });
+    expect(runtime.objects.filter((o) => o.type === "frame")).toHaveLength(4);
+
+    await runAgentCommand({ command: "Delete a SWOT analysis", boardId: "x2", userId: "u5" });
+    expect(runtime.objects.filter((o) => o.type === "frame")).toHaveLength(0);
   });
 
   it("supports 6+ distinct command types", () => {

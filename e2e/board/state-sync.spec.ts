@@ -26,7 +26,7 @@ test("multiplayer state stays consistent across create/delete and refresh", asyn
     await pageB.locator("canvas").first().waitFor();
 
     // Start from a known clean board.
-    await pageA.evaluate(() => window.__collabboardPerf?.clearObjects());
+    await pageA.evaluate(() => window.__bendPerf?.clearObjects());
     await expect.poll(async () => Number(await metric(pageA, "objectCount"))).toBe(0);
     await expect.poll(async () => Number(await metric(pageB, "objectCount"))).toBe(0);
 

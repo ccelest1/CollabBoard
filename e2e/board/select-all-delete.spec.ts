@@ -25,11 +25,11 @@ test("cmd/ctrl+a then delete removes all board objects and syncs to collaborator
     await pageA.locator("canvas").first().waitFor();
     await pageB.locator("canvas").first().waitFor();
 
-    await pageA.evaluate(() => window.__collabboardPerf?.clearObjects());
+    await pageA.evaluate(() => window.__bendPerf?.clearObjects());
     await expect.poll(async () => Number(await metric(pageA, "objectCount"))).toBe(0);
     await expect.poll(async () => Number(await metric(pageB, "objectCount"))).toBe(0);
 
-    await pageA.evaluate(() => window.__collabboardPerf?.seedObjects(12));
+    await pageA.evaluate(() => window.__bendPerf?.seedObjects(12));
     await expect.poll(async () => Number(await metric(pageA, "objectCount"))).toBeGreaterThanOrEqual(12);
     await expect.poll(async () => Number(await metric(pageB, "objectCount"))).toBeGreaterThanOrEqual(12);
 

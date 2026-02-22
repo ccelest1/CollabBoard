@@ -15,7 +15,30 @@ export default async function Home() {
   return (
     <div className="mx-auto flex min-h-[calc(100vh-10rem)] w-full max-w-5xl flex-col items-center justify-center px-4 py-12">
       <div className="w-full max-w-xl text-center">
-        <h1 className="text-3xl font-semibold tracking-tight text-slate-900 dark:text-white">Welcome to CollabBoard</h1>
+        <h1 className="flex items-center justify-center text-3xl font-semibold tracking-tight text-slate-900 dark:text-white">
+          <span aria-label="CB" className="block text-7xl font-black leading-none tracking-tight text-slate-900 dark:text-white">
+            <img
+              src="/icons/bend-logo-halftone-arch-dark.png"
+              alt="BEND"
+              className="mx-auto block dark:hidden"
+              style={{
+                height: 90,
+                width: "auto",
+                objectFit: "contain",
+              }}
+            />
+            <img
+              src="/icons/bend-logo-halftone-arch-light.png"
+              alt="BEND"
+              className="mx-auto hidden dark:block"
+              style={{
+                height: 90,
+                width: "auto",
+                objectFit: "contain",
+              }}
+            />
+          </span>
+        </h1>
         <p className="mt-2 text-sm text-slate-600 dark:text-slate-200">Real-time collaboration in the AI-age.</p>
       </div>
 
