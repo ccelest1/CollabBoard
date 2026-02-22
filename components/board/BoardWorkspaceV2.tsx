@@ -3015,19 +3015,8 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
         <div className="relative flex items-center gap-2 text-sm md:gap-4">
           <span aria-label="CB" className="block shrink-0 text-2xl font-black leading-none tracking-tight text-slate-900 dark:text-white">
             <img
-              src="/icons/bend-logo-halftone-arch-dark.png"
-              alt="BEND"
-              className="block dark:hidden"
-              style={{
-                height: 32,
-                width: "auto",
-                objectFit: "contain",
-              }}
-            />
-            <img
               src="/icons/bend-logo-halftone-arch-light.png"
               alt="BEND"
-              className="hidden dark:block"
               style={{
                 height: 32,
                 width: "auto",

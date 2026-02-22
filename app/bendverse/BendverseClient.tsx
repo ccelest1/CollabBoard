@@ -68,7 +68,7 @@ export default function BendverseClient({ currentUserId, userName }: Props) {
     const rejectToLogin = async () => {
       await supabase.auth.signOut();
       clearClientStorage();
-      window.location.replace("/login?redirect=/bendverse");
+      window.location.replace("/login?redirect=/boardverse");
     };
 
     const verifyUser = async () => {

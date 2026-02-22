@@ -6,9 +6,10 @@ export const metadata: Metadata = {
   title: "BEND",
   description: "Collaborative whiteboard",
   icons: {
-    icon: "/icons/bend-browser-icon.png",
-    shortcut: "/icons/bend-browser-icon.png",
-    apple: "/icons/bend-browser-icon.png",
+    icon: [
+      { url: "/favicon.ico", type: "image/x-icon" },
+      { url: "/favicon.png", sizes: "32x32", type: "image/png" },
+    ],
   },
 };
 
