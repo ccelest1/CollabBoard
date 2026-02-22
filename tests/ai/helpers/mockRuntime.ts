@@ -136,6 +136,13 @@ export function createInMemoryHandlers(seed: BoardObject[] = []) {
       touch(object, "test-user");
       return object;
     },
+    deleteObject: ({ objectId }) => {
+      const index = objects.findIndex((item) => item.id === objectId);
+      if (index < 0) return { deleted: false, objectId };
+      objects.splice(index, 1);
+      broadcasts.push({ userId: "test-user", objectId });
+      return { deleted: true, objectId };
+    },
     getBoardObjects: () => objects.map((item) => ({ ...item })),
   };
 

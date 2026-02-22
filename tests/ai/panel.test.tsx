@@ -42,14 +42,16 @@ describe("AIAgentPanel", () => {
     expect(screen.getByText("Arrange in a grid")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: chipText }));
-    expect(fetch).toHaveBeenCalledTimes(1);
-    expect(fetch).toHaveBeenCalledWith(
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenNthCalledWith(
+      1,
       "/api/ai/command",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ command: chipText, boardId: "b1", userId: "u1" }),
       }),
     );
+    expect(fetch).toHaveBeenNthCalledWith(2, "/api/ai/board-bounds?boardId=b1");
   });
 
   it("does nothing when submitting empty input", async () => {
@@ -61,7 +63,7 @@ describe("AIAgentPanel", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("shows executing state, disables input, and hides chips", async () => {
+  it("shows executing state, disables input, and keeps prompts visible", async () => {
     const user = userEvent.setup();
     let resolveFetch: ((value: Response) => void) | null = null;
     vi.mocked(fetch).mockReturnValue(
@@ -76,7 +78,7 @@ describe("AIAgentPanel", () => {
     await user.type(input, "Create a SWOT analysis{enter}");
 
     expect(screen.getByText("AI is working...")).toBeInTheDocument();
-    expect(screen.queryByText("Suggested Prompts:")).not.toBeInTheDocument();
+    expect(screen.getByText("Suggested Prompts:")).toBeInTheDocument();
     expect(input).toBeDisabled();
 
     await act(async () => {
@@ -90,8 +92,7 @@ describe("AIAgentPanel", () => {
     });
   });
 
-  it("shows success summary then resets after 3 seconds", async () => {
-    vi.useFakeTimers();
+  it("returns to idle immediately and appends conversation history on success", async () => {
     vi.mocked(fetch).mockResolvedValue(
       new Response(JSON.stringify({ summary: "Created template." }), {
         status: 200,
@@ -109,16 +110,7 @@ describe("AIAgentPanel", () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(screen.getByText("Created template.")).toBeInTheDocument();
-    expect(screen.queryByText("Suggested Prompts:")).not.toBeInTheDocument();
-
-    act(() => {
-      vi.advanceTimersByTime(3000);
-    });
-    await act(async () => {
-      await Promise.resolve();
-    });
-
+    expect(screen.getByText("Done — Created template.")).toBeInTheDocument();
     expect(screen.getByText("Suggested Prompts:")).toBeInTheDocument();
     expect(screen.getByPlaceholderText("Type an AI command...")).toHaveValue("");
   });

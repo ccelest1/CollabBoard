@@ -3,8 +3,13 @@ import "./globals.css";
 import { AppShell } from "@/components/AppShell";
 
 export const metadata: Metadata = {
-  title: "CollabBoard",
+  title: "BEND",
   description: "Collaborative whiteboard",
+  icons: {
+    icon: "/icons/bend-browser-icon.png",
+    shortcut: "/icons/bend-browser-icon.png",
+    apple: "/icons/bend-browser-icon.png",
+  },
 };
 
 export default function RootLayout({

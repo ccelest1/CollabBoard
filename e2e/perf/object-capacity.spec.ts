@@ -16,8 +16,8 @@ test("board handles 500+ objects without severe FPS degradation", async ({ page,
   await page.locator("canvas").first().waitFor();
 
   const seededCount = await page.evaluate((count) => {
-    window.__collabboardPerf?.clearObjects();
-    return window.__collabboardPerf?.seedObjects(count) ?? 0;
+    window.__bendPerf?.clearObjects();
+    return window.__bendPerf?.seedObjects(count) ?? 0;
   }, requiredObjectCount);
   expect(seededCount).toBeGreaterThanOrEqual(requiredObjectCount);
 

@@ -2,11 +2,14 @@ import { ChatOpenAI } from "@langchain/openai";
 import { Client as LangSmithClient } from "langsmith";
 import { buildTools, calculateCenteredGridPositions, createBoardTools, type BoardMutationHandlers } from "@/lib/ai/tools";
 import { calculateRunCost } from "@/lib/ai/costTracker";
-import { HumanMessage, SystemMessage, type AIMessage } from "@langchain/core/messages";
+import { HumanMessage, SystemMessage, ToolMessage, type AIMessage } from "@langchain/core/messages";
 import type { BoardObject } from "@/lib/boards/model";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadPersistedBoardSnapshot, savePersistedBoardSnapshot } from "@/lib/supabase/boardStateStore";
 import { createBoardEventsChannel, sendBoardRealtimeEvent, subscribeChannel } from "@/lib/supabase/boardRealtime";
+import { findEmptyPlacement } from "@/lib/ai/boardState";
+import { recordChange } from "@/lib/supabase/versionHistory";
+import { classifyIntent, isInvalidInput } from "@/lib/ai/intentClassifier";
 
 type CommandType = "creation" | "manipulation" | "layout" | "complex";
 type AgentBoundingBox = {
@@ -16,50 +19,46 @@ type AgentBoundingBox = {
   height: number;
 };
 
-const SYSTEM_PROMPT = `You are an AI assistant controlling a collaborative whiteboard called CollabBoard.
+const SYSTEM_PROMPT = `You are an AI assistant controlling a collaborative whiteboard called BEND.
 Coordinate system: (0,0) is top-left, x increases right, y increases down.
 
-Available tools: createStickyNote, createShape, createFrame, createConnector,
-moveObject, resizeObject, updateText, changeColor, getBoardState.
+CRITICAL EXECUTION RULES:
+1. You operate in a verified loop. After each batch of tool calls completes, you are called again.
+   Continue calling tools until ALL required objects are created or updated.
+   Do not stop after 1-2 calls when more are required.
 
-Rules you must follow:
-1. Only call getBoardState when the command references EXISTING objects
-   (e.g. "move all pink notes", "resize the frame").
-   Never call it for pure creation commands - this saves time and tokens.
-   IMPORTANT: Do NOT call getBoardState for any command that creates new objects
-   from scratch. Only call getBoardState if the command explicitly references objects
-   that already exist on the board (e.g. "move the existing notes", "resize that frame").
-   Creating a SWOT analysis, retrospective board, or any template does NOT require
-   getBoardState - create everything at absolute coordinates.
-2. For multi-step commands, plan ALL steps internally before executing any.
-3. Default measurements: sticky note = 150x150px, gap between elements = 20px,
-   frame padding = 40px around its contents.
-4. After all steps complete, return a concise summary listing exactly what was
-   created or changed with positions (e.g. "Created Strengths frame at (0,0),
-   Weaknesses at (220,0)...").
-5. If a command is ambiguous, make a reasonable assumption and state it briefly.
-6. When asked to change a color without a specific target:
-   1. Call getBoardState to see what exists on the board
-   2. If there is only one sticky note -> change that one, no clarification needed
-   3. If there are multiple sticky notes -> change ALL of them to the requested color
-   4. If there are no sticky notes -> respond: "No sticky notes found on the board.
-      Add a sticky note first, then I can change its color."
-   Never ask the user to specify which object. Always act on the most reasonable
-   interpretation and state what you did in the summary.
-7. For "space evenly", "arrange evenly", or "distribute elements" commands:
-   1. Call getBoardState immediately - no planning text and no explanation first
-   2. Take the returned objects array
-   3. Calculate centered grid positions with:
-      cols = Math.ceil(Math.sqrt(count))
-      rows = Math.ceil(count / cols)
-      totalWidth = cols * itemWidth + (cols - 1) * 20
-      totalHeight = rows * itemHeight + (rows - 1) * 20
-      startX = -(totalWidth / 2)
-      startY = -(totalHeight / 2)
-      each item: x = startX + col * (itemWidth + 20), y = startY + row * (itemHeight + 20)
-   4. Call moveObject for each item in parallel
-   5. Return only the final summary (no intermediate text)
-   Execute all of this in one pass. Do not ask for clarification.`;
+2. For these commands, use EXACT tool counts:
+   - "SWOT analysis" -> EXACTLY 4 createFrame calls:
+     Strengths (0,0,200,200), Weaknesses (220,0,200,200),
+     Opportunities (0,220,200,200), Threats (220,220,200,200)
+   - "2x3 grid for pros and cons" -> EXACTLY 6 createStickyNote calls:
+     Pro 1 (0,0), Pro 2 (170,0), Con 1 (0,170), Con 2 (170,170), Pro 3 (340,0), Con 3 (340,170)
+   - "user journey map with 5 stages" -> create 1 outer frame + 5 stage sticky notes
+   - "retrospective board" -> EXACTLY 3 createFrame calls:
+     What Went Well (0,0,250,500), What Didn't (270,0,250,500), Action Items (540,0,250,500)
+
+3. Multi-step commands (create then modify):
+   complete all creation first, then mutate using returned ids.
+   Never claim you cannot find an object created in the same request.
+
+4. getBoardState returns all objects including user-created objects.
+   When asked to act on existing objects (move/recolor/resize), call getBoardState first.
+
+5. Only call getBoardState for existing-object commands, not pure creation commands.
+
+6. Placement rule for multi-object templates:
+   call getBoardState first, find rightmost x, and start new template at maxX + 60.
+   Never place a full template at 0,0 when content already exists.
+
+7. For "resize frame to fit contents":
+   1. Call getBoardState
+   2. Get ALL objects that are not frames (ignore parentId entirely)
+   3. Calculate bounding box with 40px padding on all sides
+   4. Call moveObject to reposition the frame to minX-40, minY-40
+   5. Call resizeObject to set width = maxX-minX+80, height = maxY-minY+80
+   6. The frame should fully surround every non-frame object on the board
+
+8. Keep responses concise and action-focused.`;
 
 const COMPLEX_SIGNALS = [
   "swot",
@@ -142,6 +141,18 @@ function parseJsonMaybe(value: unknown): unknown {
   }
 }
 
+function sanitizeCommand(command: string) {
+  return command.replace(/\s+/g, " ").trim();
+}
+
+function safeJsonStringify(value: unknown) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return JSON.stringify({ error: "Tool result could not be serialized" });
+  }
+}
+
 function collectObjectIds(value: unknown, found = new Set<string>()) {
   const parsed = parseJsonMaybe(value);
   if (!parsed || typeof parsed !== "object") return found;
@@ -212,7 +223,7 @@ function extractTokenUsage(messages: Array<{ type?: string; [key: string]: unkno
 }
 
 export function routeModel(command: string): ChatOpenAI {
-  const modelName = "gpt-4o-mini";
+  const modelName = getModelName(command);
   return new ChatOpenAI({
     model: modelName,
     temperature: 0,
@@ -258,20 +269,12 @@ function extractToolCalls(message: AIMessage | { tool_calls?: unknown; additiona
   return result;
 }
 
-function hasIdDependency(value: unknown, knownIds: Set<string>): boolean {
-  if (typeof value === "string") return knownIds.has(value);
-  if (Array.isArray(value)) return value.some((item) => hasIdDependency(item, knownIds));
-  if (value && typeof value === "object") {
-    return Object.values(value as Record<string, unknown>).some((item) => hasIdDependency(item, knownIds));
-  }
-  return false;
-}
-
 async function executeSingleTool(params: {
   call: ToolCallLike;
   toolsByName: Record<string, { invoke: (input: any, config?: any) => Promise<any> }>;
   startedAt: number;
   command: string;
+  timeoutMs?: number;
 }) {
   const tool = params.toolsByName[params.call.name];
   if (!tool) return null;
@@ -284,15 +287,34 @@ async function executeSingleTool(params: {
     atMs: toolStartedAt,
     sinceAgentStartMs: toolStartedAt - params.startedAt,
   });
-  const result = await tool.invoke(params.call.args ?? {});
-  const toolEndedAt = Date.now();
-  console.log("[AI timing] tool end", {
-    tool: params.call.name,
-    atMs: toolEndedAt,
-    durationMs: toolEndedAt - toolStartedAt,
-    sinceAgentStartMs: toolEndedAt - params.startedAt,
-  });
-  return { call: params.call, result };
+  const timeoutMs =
+    params.timeoutMs ?? (["resizeObject", "moveObject"].includes(params.call.name) ? 12000 : 8000);
+  try {
+    const result = await Promise.race([
+      tool.invoke(params.call.args ?? {}),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error(`Tool ${params.call.name} timed out`)), timeoutMs);
+      }),
+    ]);
+    const toolEndedAt = Date.now();
+    console.log("[AI timing] tool end", {
+      tool: params.call.name,
+      atMs: toolEndedAt,
+      durationMs: toolEndedAt - toolStartedAt,
+      sinceAgentStartMs: toolEndedAt - params.startedAt,
+    });
+    return { call: params.call, result };
+  } catch (error) {
+    const toolEndedAt = Date.now();
+    console.error("[AI timing] tool failed", {
+      tool: params.call.name,
+      atMs: toolEndedAt,
+      durationMs: toolEndedAt - toolStartedAt,
+      sinceAgentStartMs: toolEndedAt - params.startedAt,
+      message: error instanceof Error ? error.message : "Unknown tool execution error",
+    });
+    return null;
+  }
 }
 
 async function executeToolCallsOptimized(params: {
@@ -302,8 +324,11 @@ async function executeToolCallsOptimized(params: {
   command: string;
 }) {
   const stateCalls = params.toolCalls.filter((call) => call.name === "getBoardState");
-  const pending = params.toolCalls.filter((call) => call.name !== "getBoardState");
-  const knownCreatedIds = new Set<string>();
+  const creationToolNames = new Set(["createStickyNote", "createShape", "createFrame"]);
+  const creationCalls = params.toolCalls.filter((call) => creationToolNames.has(call.name));
+  const mutationCalls = params.toolCalls.filter(
+    (call) => call.name !== "getBoardState" && !creationToolNames.has(call.name),
+  );
   const outputs: Array<{ call: ToolCallLike; result: unknown }> = [];
 
   for (const stateCall of stateCalls) {
@@ -315,99 +340,84 @@ async function executeToolCallsOptimized(params: {
     });
     if (!output) continue;
     outputs.push(output);
-    collectObjectIds(output.result, knownCreatedIds);
   }
 
-  while (pending.length > 0) {
-    const independent = pending.filter((call) => !hasIdDependency(call.args, knownCreatedIds));
-    const firstPending = pending[0];
-    if (!firstPending) break;
-    const batch = independent.length > 0 ? independent : [firstPending];
-    const runBatch = async (call: ToolCallLike) => {
-        const output = await executeSingleTool({
-          call,
-          toolsByName: params.toolsByName,
-          startedAt: params.startedAt,
-          command: params.command,
-        });
-        if (!output) return;
-        outputs.push(output);
-        collectObjectIds(output.result, knownCreatedIds);
-    };
-    const shouldForceSequential = batch.some((call) => call.name === "createFrame");
-    if (shouldForceSequential) {
-      for (const call of batch) {
-        await runBatch(call);
-      }
-    } else {
-      await Promise.all(batch.map((call) => runBatch(call)));
+  const creationOutputs = await Promise.all(
+    creationCalls.map((call) =>
+      executeSingleTool({
+        call,
+        toolsByName: params.toolsByName,
+        startedAt: params.startedAt,
+        command: params.command,
+      }),
+    ),
+  );
+  const creationResults = creationOutputs.filter((value): value is { call: ToolCallLike; result: unknown } => Boolean(value));
+  outputs.push(...creationResults);
+
+  const createdIds = creationResults.flatMap((output) => [...collectObjectIds(output.result)]);
+  const lastCreatedId = createdIds.at(-1);
+  const resolvedMutationCalls = mutationCalls.map((call) => {
+    const args = { ...(call.args ?? {}) };
+    if (typeof args.objectId !== "string" && lastCreatedId) {
+      args.objectId = lastCreatedId;
     }
-    for (const call of batch) {
-      const index = pending.indexOf(call);
-      if (index >= 0) pending.splice(index, 1);
-    }
-  }
+    return { ...call, args };
+  });
+
+  const mutationOutputs = await Promise.all(
+    resolvedMutationCalls.map((call) =>
+      executeSingleTool({
+        call,
+        toolsByName: params.toolsByName,
+        startedAt: params.startedAt,
+        command: params.command,
+      }),
+    ),
+  );
+  outputs.push(...mutationOutputs.filter((value): value is { call: ToolCallLike; result: unknown } => Boolean(value)));
 
   return outputs;
 }
 
-function colorNameFromValue(value: unknown) {
-  if (typeof value !== "string") return null;
-  const lowered = value.toLowerCase();
-  const byHex: Record<string, string> = {
-    "#22c55e": "green",
-    "#fde68a": "yellow",
-    "#3b82f6": "blue",
-    "#ef4444": "red",
-    "#a855f7": "purple",
-    "#f59e0b": "orange",
-    "#ec4899": "pink",
-    "#94a3b8": "gray",
-    "#0f172a": "black",
-    "#ffffff": "white",
+function buildConversationalSummary(
+  toolName: string,
+  count: number,
+  details?: { color?: string; type?: string; label?: string },
+): string {
+  const color = details?.color ?? "";
+  const type = details?.type ?? "item";
+  const label = details?.label ?? "";
+  const phrases: Record<string, (n: number) => string> = {
+    createStickyNote: (n) =>
+      n === 1
+        ? `I added a${color ? ` ${color}` : ""} sticky note${label ? ` labeled "${label}"` : ""}`
+        : `I created ${n}${color ? ` ${color}` : ""} sticky notes`,
+    createFrame: (n) => (n === 1 ? `I set up a frame${label ? ` called "${label}"` : ""}` : `I built ${n} frames`),
+    createShape: (n) => (n === 1 ? `I drew a${color ? ` ${color}` : ""} ${type}` : `I created ${n} ${type}s`),
+    moveObject: (n) => `I moved ${n} object${n > 1 ? "s" : ""} to the right`,
+    changeColor: (n) => `I updated the color on ${n} object${n > 1 ? "s" : ""}`,
+    resizeObject: (n) => `I resized ${n} object${n > 1 ? "s" : ""}`,
+    updateText: (n) => `I updated the text on ${n} object${n > 1 ? "s" : ""}`,
+    getBoardState: () => "",
   };
-  return byHex[lowered] ?? value;
+  return phrases[toolName]?.(count) ?? "Done";
 }
 
-function describeToolCall(result: { call: ToolCallLike; result: unknown }) {
-  if (result.call.name === "changeColor") {
-    const color = colorNameFromValue(result.call.args?.color);
-    const objectType =
-      result.result && typeof result.result === "object" && "type" in (result.result as Record<string, unknown>)
-        ? String((result.result as Record<string, unknown>).type)
-        : "object";
-    return { action: "changeColor", objectType, color };
-  }
-  if (result.call.name === "createStickyNote") return { action: "createStickyNote" };
-  if (result.call.name === "createFrame") return { action: "createFrame" };
-  if (result.call.name === "moveObject") return { action: "moveObject" };
-  return { action: result.call.name };
-}
-
-function buildSummaryFromToolResults(results: Array<{ call: ToolCallLike; result: unknown }>) {
-  if (results.length === 0) return "Done";
-  const described = results.map((result) => describeToolCall(result));
-  const colorChanges = described.filter((item) => item.action === "changeColor");
-  if (colorChanges.length > 0) {
-    const stickyChanges = colorChanges.filter((item) => item.objectType === "sticky");
-    const targetChanges = stickyChanges.length > 0 ? stickyChanges : colorChanges;
-    const color = targetChanges[0]?.color ?? "new color";
-    const noun = stickyChanges.length > 0 ? "sticky notes" : "objects";
-    return `Changed ${targetChanges.length} ${noun} to ${color}.`;
-  }
-  const stickyCount = described.filter((item) => item.action === "createStickyNote").length;
-  if (stickyCount > 0) {
-    return stickyCount === 1 ? "Created 1 sticky note." : `Created ${stickyCount} sticky notes.`;
-  }
-  const frameCount = described.filter((item) => item.action === "createFrame").length;
-  if (frameCount > 0) {
-    return frameCount === 1 ? "Created 1 frame." : `Created ${frameCount} frames.`;
-  }
-  const movedCount = described.filter((item) => item.action === "moveObject").length;
-  if (movedCount > 0) {
-    return movedCount === 1 ? "Moved 1 object." : `Moved ${movedCount} objects.`;
-  }
-  return "Done";
+function buildGroupedToolSummary(results: Array<{ call: ToolCallLike; result: unknown }>) {
+  const grouped = results.reduce(
+    (acc, result) => {
+      acc[result.call.name] = (acc[result.call.name] ?? 0) + 1;
+      return acc;
+    },
+    {} as Record<string, number>,
+  );
+  const summary = Object.entries(grouped)
+    .filter(([name]) => name !== "getBoardState")
+    .map(([name, count]) => buildConversationalSummary(name, count))
+    .filter(Boolean)
+    .join(", ");
+  return summary || "Done";
 }
 
 function normalizeColor(command: string) {
@@ -442,7 +452,7 @@ function isAmbiguousStickyColorCommand(command: string) {
 
 function isAmbiguousSpacingCommand(command: string) {
   const lowered = command.toLowerCase();
-  return /\b(space|spacing|arrange|align|distribute|layout|evenly)\b/.test(lowered);
+  return isSpaceEvenlyCommand(command) || /\b(arrange|align|layout)\b/.test(lowered);
 }
 
 function includesAll(haystack: string, needles: string[]) {
@@ -464,6 +474,19 @@ function isMovePinkStickiesRightCommand(command: string) {
   return includesAll(lowered, ["move all", "pink", "sticky"]) && lowered.includes("right");
 }
 
+function isMoveColorCommand(command: string): boolean {
+  const lowered = command.toLowerCase();
+  return (
+    (lowered.includes("move") || lowered.includes("push") || lowered.includes("shift") || lowered.includes("send")) &&
+    (lowered.includes("sticky") || lowered.includes("notes")) &&
+    (lowered.includes("right") ||
+      lowered.includes("left") ||
+      lowered.includes("top") ||
+      lowered.includes("bottom") ||
+      lowered.includes("side"))
+  );
+}
+
 function isResizeFrameFitContentsCommand(command: string) {
   const lowered = command.toLowerCase();
   return lowered.includes("resize") && lowered.includes("frame") && lowered.includes("fit");
@@ -474,19 +497,767 @@ function isArrangeStickyGridCommand(command: string) {
   return lowered.includes("arrange") && lowered.includes("grid");
 }
 
+function isArrangeGridCommand(command: string) {
+  const lowered = command.toLowerCase();
+  return (
+    (lowered.includes("arrange") && (lowered.includes("grid") || lowered.includes("sticky"))) ||
+    (lowered.includes("put") && lowered.includes("grid")) ||
+    (lowered.includes("organize") && lowered.includes("sticky")) ||
+    lowered.includes("arrange in a grid")
+  );
+}
+
 function isProsConsGridCommand(command: string) {
   const lowered = command.toLowerCase();
   return includesAll(lowered, ["2x3", "grid", "sticky", "pros", "cons"]);
 }
 
 function isJourneyMapCommand(command: string) {
+  if (isDeleteCommand(command)) return false;
   const lowered = command.toLowerCase();
-  return includesAll(lowered, ["journey map", "5 stages"]) || includesAll(lowered, ["journey", "5", "stages"]);
+  return (
+    lowered.includes("journey map") ||
+    lowered.includes("user journey") ||
+    (lowered.includes("journey") && lowered.includes("stage")) ||
+    (lowered.includes("user") && lowered.includes("stages")) ||
+    lowered.includes("customer journey")
+  );
 }
 
 function isRetrospectiveBoardCommand(command: string) {
   const lowered = command.toLowerCase();
   return lowered.includes("retrospective board");
+}
+
+function isSWOTCommand(command: string) {
+  if (isDeleteCommand(command)) return false;
+  const lowered = command.toLowerCase();
+  return (
+    lowered.includes("swot") ||
+    (lowered.includes("strength") && lowered.includes("weakness")) ||
+    lowered.includes("four quadrants") ||
+    (lowered.includes("quadrant") && lowered.includes("analysis"))
+  );
+}
+
+function isRetroCommand(command: string) {
+  if (isDeleteCommand(command)) return false;
+  const lowered = command.toLowerCase();
+  return (
+    lowered.includes("retrospective") ||
+    lowered.includes("retro") ||
+    lowered.includes("went well") ||
+    lowered.includes("action items") ||
+    (lowered.includes("what") && lowered.includes("didn't")) ||
+    lowered.includes("sprint review")
+  );
+}
+
+function isGridCommand(command: string) {
+  if (isDeleteCommand(command)) return false;
+  if (isArrangeGridCommand(command)) return false;
+  const lowered = command.toLowerCase();
+  return (
+    lowered.includes("2x3") ||
+    lowered.includes("3x2") ||
+    lowered.includes("grid of sticky") ||
+    (lowered.includes("pros") && lowered.includes("cons")) ||
+    (lowered.includes("grid") && lowered.includes("notes"))
+  );
+}
+
+function isBulkCreateCommand(cmd: string): {
+  matched: boolean;
+  count: number;
+  objectType: "sticky" | "rectangle" | "circle" | "frame" | "connector" | "text" | "journeyMap" | "swot" | "retro";
+  color: string | null;
+  arrangement: "row" | "column" | "grid" | null;
+} {
+  const lowered = cmd.toLowerCase();
+  const templatePattern =
+    /(?:create|add|make|draw|generate|build|place|put|give me|show|produce)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+((?:user\s+)?journey\s+maps?|swot(?:\s+analyses?)?|retrospectives?)/i;
+  const pattern =
+    /(?:create|add|make|draw|generate|build|place|put|give me|show|produce)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(\w+)?\s*(sticky\s*notes?|stickies|rectangles?|squares?|circles?|ovals?|frames?|arrows?|connectors?|lines?|textboxes?|text\s*boxes?|shapes?)/i;
+  const wordNumbers: Record<string, number> = {
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+    seven: 7,
+    eight: 8,
+    nine: 9,
+    ten: 10,
+  };
+
+  const templateMatch = lowered.match(templatePattern);
+  if (templateMatch) {
+    const countRaw = (templateMatch[1] ?? "").toLowerCase();
+    const count = wordNumbers[countRaw] ?? Number.parseInt(countRaw, 10) ?? 1;
+    const typeWord = (templateMatch[2] ?? "").toLowerCase().trim();
+    const templateTypeMap: Record<string, "journeyMap" | "swot" | "retro"> = {
+      "journey maps": "journeyMap",
+      "journey map": "journeyMap",
+      "user journey maps": "journeyMap",
+      "user journey map": "journeyMap",
+      swot: "swot",
+      "swot analysis": "swot",
+      "swot analyses": "swot",
+      retrospectives: "retro",
+      retrospective: "retro",
+    };
+    const objectType = Object.entries(templateTypeMap).find(([key]) => typeWord.includes(key))?.[1] ?? "journeyMap";
+    return { matched: true, count, objectType, color: null, arrangement: null };
+  }
+
+  const match = lowered.match(pattern);
+  if (!match) {
+    return { matched: false, count: 0, objectType: "sticky", color: null, arrangement: null };
+  }
+
+  const countRaw = (match[1] ?? "").toLowerCase();
+  const count = wordNumbers[countRaw] ?? Number.parseInt(countRaw, 10) ?? 1;
+  const colorWord = match[2] ?? null;
+  const typeWord = (match[3] ?? "").toLowerCase().trim();
+
+  const typeMap: Record<string, "sticky" | "rectangle" | "circle" | "frame" | "connector" | "text"> = {
+    "sticky notes": "sticky",
+    "sticky note": "sticky",
+    stickies: "sticky",
+    sticky: "sticky",
+    rectangles: "rectangle",
+    rectangle: "rectangle",
+    squares: "rectangle",
+    square: "rectangle",
+    circles: "circle",
+    circle: "circle",
+    ovals: "circle",
+    oval: "circle",
+    frames: "frame",
+    frame: "frame",
+    arrows: "connector",
+    arrow: "connector",
+    connectors: "connector",
+    connector: "connector",
+    lines: "connector",
+    line: "connector",
+    textboxes: "text",
+    "text boxes": "text",
+    textbox: "text",
+    "text box": "text",
+    shapes: "rectangle",
+    shape: "rectangle",
+  };
+
+  const objectType = Object.entries(typeMap).find(([key]) => typeWord.includes(key))?.[1] ?? "sticky";
+
+  const colorMap: Record<string, string> = {
+    pink: "#FBCFE8",
+    yellow: "#FDE68A",
+    blue: "#BFDBFE",
+    green: "#BBF7D0",
+    orange: "#FED7AA",
+    red: "#FCA5A5",
+    purple: "#DDD6FE",
+    white: "#FFFFFF",
+    black: "#000000",
+    grey: "#E5E7EB",
+    gray: "#E5E7EB",
+  };
+
+  const color = colorWord ? colorMap[colorWord.toLowerCase()] ?? null : null;
+  const arrangement = lowered.includes("in a row") || lowered.includes("horizontally")
+    ? "row"
+    : lowered.includes("in a column") || lowered.includes("vertically")
+      ? "column"
+      : "grid";
+
+  return { matched: true, count, objectType, color, arrangement };
+}
+
+function isDeleteCommand(cmd: string): boolean {
+  const lowered = cmd.toLowerCase();
+  const deleteVerbs = ["delete", "remove", "erase", "clear the board", "clear all", "get rid of", "destroy", "wipe"];
+  return deleteVerbs.some((verb) => lowered.includes(verb));
+}
+
+function isSpaceEvenlyCommand(cmd: string): boolean {
+  const lowered = cmd.toLowerCase();
+  return (
+    (lowered.includes("space") && lowered.includes("evenly")) ||
+    lowered.includes("distribute") ||
+    lowered.includes("spread out") ||
+    (lowered.includes("even") && lowered.includes("spacing"))
+  );
+}
+
+function isCreateThenModifyCommand(cmd: string): boolean {
+  const lowered = cmd.toLowerCase();
+  const bulk = isBulkCreateCommand(cmd);
+  const referencesSticky = /\bsticky\b|\bstickies\b|\bnote\b/.test(lowered);
+  return (
+    (lowered.includes("and then") ||
+      lowered.includes("then make") ||
+      lowered.includes("then change") ||
+      lowered.includes("and make") ||
+      lowered.includes("and change")) &&
+    (lowered.includes("create") || lowered.includes("add") || lowered.includes("make")) &&
+    referencesSticky &&
+    (!bulk.matched || bulk.count <= 1)
+  );
+}
+
+async function executeCreateThenModify(params: {
+  boardId: string;
+  start: number;
+  command: string;
+  toolsByName: Record<string, { invoke: (input: any, config?: any) => Promise<any> }>;
+}) {
+  const splitPattern = /and then|then make|then change|and make|and change/;
+  const lower = params.command.toLowerCase();
+  const createPart = lower.split(splitPattern)[0] ?? lower;
+  const modifyPart = lower.split(splitPattern)[1] ?? "";
+  const colorMap: Record<string, string> = {
+    red: "#FCA5A5",
+    pink: "#FBCFE8",
+    yellow: "#FDE68A",
+    blue: "#BFDBFE",
+    green: "#BBF7D0",
+    orange: "#FED7AA",
+    purple: "#DDD6FE",
+    white: "#FFFFFF",
+    black: "#000000",
+  };
+  const createColor = Object.entries(colorMap).find(([key]) => createPart.includes(key));
+  const modifyColor = Object.entries(colorMap).find(([key]) => modifyPart.includes(key));
+
+  const created = await params.toolsByName.createStickyNote.invoke({
+    text: "Sticky",
+    x: 0,
+    y: 0,
+    color: createColor?.[1] ?? "#FDE68A",
+  });
+  const createdObjects: BoardObject[] = [];
+  collectBoardObjects(created, createdObjects);
+  mergeBoardCache(params.boardId, createdObjects);
+
+  await sleep(300);
+
+  const createdId = [...collectObjectIds(created)][0];
+  if (createdId && modifyColor) {
+    const updated = await params.toolsByName.changeColor.invoke({
+      objectId: createdId,
+      color: modifyColor[1],
+    });
+    const updatedObjects: BoardObject[] = [];
+    collectBoardObjects(updated, updatedObjects);
+    mergeBoardCache(params.boardId, updatedObjects);
+  }
+
+  const finalColor = modifyColor?.[0] ?? createColor?.[0] ?? "default";
+  return {
+    summary: `I created a ${finalColor} sticky note`,
+    objectsAffected: createdId ? [createdId] : [],
+    durationMs: Date.now() - params.start,
+    boundingBox: computeBoundingBox(createdObjects),
+    objectsCreated: createdObjects,
+  };
+}
+
+async function executeBulkCreate(params: {
+  boardId: string;
+  userId: string;
+  start: number;
+  command: string;
+  handlers: BoardMutationHandlers;
+  toolsByName: Record<string, { invoke: (input: any, config?: any) => Promise<any> }>;
+}) {
+  try {
+    const { matched, count, objectType, color, arrangement } = isBulkCreateCommand(params.command);
+    if (!matched || count <= 0) {
+      return {
+        summary: "Done",
+        objectsAffected: [] as string[],
+        durationMs: Date.now() - params.start,
+        boundingBox: null,
+        objectsCreated: [] as BoardObject[],
+      };
+    }
+    if (objectType === "journeyMap") {
+      const allCreated: BoardObject[] = [];
+      const allAffected = new Set<string>();
+      for (let i = 0; i < count; i += 1) {
+        const existing = await getFreshBoardState({
+          boardId: params.boardId,
+          handlers: params.handlers,
+          minExpected: allCreated.length,
+        });
+        const offsetX =
+          existing.length > 0
+            ? Math.max(...existing.map((object) => (object.x ?? 0) + (object.width ?? 200))) + 60
+            : 0;
+        const mapResult = await executeJourneyMapTemplate({
+          boardId: params.boardId,
+          userId: params.userId,
+          start: Date.now(),
+          offsetX,
+          handlers: params.handlers,
+          toolsByName: params.toolsByName,
+        });
+        mapResult.objectsAffected.forEach((id) => allAffected.add(id));
+        allCreated.push(...(mapResult.objectsCreated ?? []));
+        await sleep(400);
+      }
+      mergeBoardCache(params.boardId, allCreated);
+      return {
+        summary: `I built ${count} user journey maps`,
+        objectsAffected: [...allAffected],
+        durationMs: Date.now() - params.start,
+        boundingBox: computeBoundingBox(allCreated) ?? (await getBoundingBoxForAffectedObjects(params.handlers, [...allAffected])),
+        objectsCreated: allCreated,
+      };
+    }
+
+    const persistedObjects = await params.handlers.getBoardObjects();
+    const boardObjects = persistedObjects.length > 0 ? persistedObjects : readBoardCache(params.boardId);
+    mergeBoardCache(params.boardId, boardObjects);
+    const offsetX = boardObjects.length > 0 ? Math.max(...boardObjects.map((object) => (object.x ?? 0) + (object.width ?? 150))) + 60 : 0;
+    const gap = 20;
+    const width = objectType === "frame" ? 200 : 150;
+    const height = objectType === "frame" ? 200 : 150;
+    const cols =
+      arrangement === "row"
+        ? Math.max(count, 1)
+        : arrangement === "column"
+          ? 1
+          : Math.ceil(Math.sqrt(Math.max(count, 1)));
+    const objectsCreated: BoardObject[] = [];
+    const affectedIds = new Set<string>();
+    const defaultColor = color ?? "#FDE68A";
+    const delayMs = objectType === "frame" ? 300 : objectType === "sticky" ? 250 : 150;
+    for (let i = 0; i < count; i += 1) {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const x = offsetX + col * (width + gap);
+      const y = row * (height + gap);
+      try {
+        let result: unknown = null;
+        if (objectType === "sticky") {
+          result = await params.toolsByName.createStickyNote.invoke({ text: "Sticky", x, y, color: defaultColor });
+        } else if (objectType === "rectangle" || objectType === "circle") {
+          result = await params.toolsByName.createShape.invoke({
+            type: objectType,
+            x,
+            y,
+            width,
+            height,
+            color: defaultColor,
+          });
+        } else if (objectType === "frame") {
+          result = await params.toolsByName.createFrame.invoke({
+            title: `Frame ${i + 1}`,
+            x,
+            y,
+            width,
+            height,
+          });
+        } else if (objectType === "connector") {
+          console.warn("[BulkCreate] Arrow/connector requires source objects");
+          continue;
+        } else if (objectType === "text") {
+          result = await params.toolsByName.createStickyNote.invoke({
+            text: `Text ${i + 1}`,
+            x,
+            y,
+            color: "#FFFFFF",
+          });
+        }
+        if (result) {
+          collectObjectIds(result, affectedIds);
+          collectBoardObjects(result, objectsCreated);
+        }
+        await sleep(delayMs);
+      } catch (err) {
+        console.error(`[BulkCreate] Failed on item ${i + 1}:`, err);
+      }
+    }
+    mergeBoardCache(params.boardId, objectsCreated);
+    const labelMap: Record<string, string> = {
+      sticky: "sticky notes",
+      rectangle: "rectangles",
+      circle: "circles",
+      frame: "frames",
+      connector: "connectors",
+      text: "textboxes",
+      journeyMap: "user journey maps",
+      swot: "SWOT templates",
+      retro: "retrospectives",
+    };
+    const typeLabel = labelMap[objectType] ?? "objects";
+    return {
+      summary:
+        objectType === "sticky"
+          ? `I created ${objectsCreated.length} sticky notes`
+          : objectType === "rectangle" || objectType === "circle"
+            ? `I drew ${objectsCreated.length} ${typeLabel}`
+            : `I created ${objectsCreated.length} ${typeLabel}`,
+      objectsAffected: [...affectedIds],
+      durationMs: Date.now() - params.start,
+      boundingBox:
+        computeBoundingBox(objectsCreated) ?? (await getBoundingBoxForAffectedObjects(params.handlers, [...affectedIds])),
+      objectsCreated,
+    };
+  } catch (err) {
+    console.error("[BulkCreate] Failed:", err);
+    return {
+      summary: "I couldn't create those objects — please try again",
+      objectsAffected: [] as string[],
+      durationMs: Date.now() - params.start,
+      boundingBox: null,
+      objectsCreated: [] as BoardObject[],
+    };
+  }
+}
+
+function extractColorFromCommand(lowered: string): string | null {
+  const colors = ["pink", "yellow", "blue", "green", "orange", "red", "purple", "white", "black"];
+  return colors.find((color) => lowered.includes(color)) ?? null;
+}
+
+function matchesColor(objectColor: string | undefined, colorName: string): boolean {
+  const colorValues: Record<string, string[]> = {
+    pink: ["fbcfe8", "f4a0c0", "ec4899", "pink"],
+    yellow: ["fde68a", "f9c74f", "yellow"],
+    blue: ["bfdbfe", "74b3f0", "3b82f6", "blue"],
+    green: ["bbf7d0", "57cc99", "22c55e", "green"],
+    orange: ["fed7aa", "f9844a", "f59e0b", "orange"],
+    red: ["fca5a5", "ef4444", "red"],
+    purple: ["ddd6fe", "8b5cf6", "a855f7", "purple"],
+    white: ["ffffff", "white"],
+    black: ["000000", "0f172a", "black"],
+  };
+  const normalized = String(objectColor ?? "").toLowerCase();
+  const tokens = colorValues[colorName] ?? [colorName];
+  return tokens.some((token) => normalized.includes(token));
+}
+
+function isStickyObject(object: BoardObject) {
+  const type = String(object.type ?? "").toLowerCase();
+  return type === "sticky" || type === "stickynote";
+}
+
+function getObjectLabel(object: BoardObject) {
+  return `${String(object.type)}:${String(object.text ?? object.id.slice(0, 8))}`;
+}
+
+function resolveByType(lowered: string, objects: BoardObject[]): BoardObject[] {
+  const typeMap: Record<string, string[]> = {
+    sticky: ["sticky", "stickynote", "note", "stickies", "sticky notes", "post-it", "postit"],
+    frame: ["frame", "frames", "container", "section"],
+    rectangle: ["rectangle", "rectangles", "square", "squares", "box", "boxes", "shape", "shapes"],
+    circle: ["circle", "circles", "oval", "ovals"],
+    connector: ["arrow", "arrows", "connector", "connectors", "line", "lines"],
+    text: ["text", "textbox", "text box", "label"],
+  };
+
+  for (const [normalizedType, keywords] of Object.entries(typeMap)) {
+    if (!keywords.some((keyword) => lowered.includes(keyword))) continue;
+    return objects.filter((object) => {
+      const objectType = String(object.type ?? "").toLowerCase();
+      return (
+        objectType === normalizedType ||
+        (objectType === "stickynote" && normalizedType === "sticky") ||
+        (objectType === "shape" && normalizedType === "rectangle")
+      );
+    });
+  }
+  return [];
+}
+
+function resolveByTemplate(lowered: string, objects: BoardObject[]): BoardObject[] {
+  if (lowered.includes("swot") || (lowered.includes("strength") && lowered.includes("weakness"))) {
+    return objects.filter((object) =>
+      ["strengths", "weaknesses", "opportunities", "threats"].some((token) =>
+        String(object.text ?? "").toLowerCase().includes(token),
+      ),
+    );
+  }
+
+  if (
+    lowered.includes("retro") ||
+    lowered.includes("retrospective") ||
+    lowered.includes("went well") ||
+    lowered.includes("action items")
+  ) {
+    return objects.filter((object) =>
+      ["went well", "didn't", "action items", "what can"].some((token) =>
+        String(object.text ?? "").toLowerCase().includes(token),
+      ),
+    );
+  }
+
+  if (
+    lowered.includes("journey") ||
+    lowered.includes("journey map") ||
+    lowered.includes("user journey") ||
+    lowered.includes("customer journey")
+  ) {
+    const byTitle = objects.filter((object) => {
+      const label = String(object.text ?? "").toLowerCase();
+      return label.includes("journey") || label.includes("stage");
+    });
+    return byTitle.length > 0 ? byTitle : objects.filter((object) => isStickyObject(object));
+  }
+
+  if (
+    (lowered.includes("grid") || lowered.includes("pros") || lowered.includes("cons")) &&
+    (lowered.includes("delete") || lowered.includes("remove") || lowered.includes("erase"))
+  ) {
+    return objects.filter((object) => {
+      const label = String(object.text ?? "").toLowerCase();
+      return label.includes("pro") || label.includes("con");
+    });
+  }
+
+  return [];
+}
+
+function resolveByColor(lowered: string, objects: BoardObject[]): BoardObject[] {
+  const colorMap: Record<string, string[]> = {
+    yellow: ["#fde68a", "#f9c74f", "yellow"],
+    pink: ["#fbcfe8", "#f4a0c0", "pink"],
+    blue: ["#bfdbfe", "#74b3f0", "blue"],
+    green: ["#bbf7d0", "#57cc99", "green"],
+    orange: ["#fed7aa", "#f9844a", "orange"],
+    red: ["#fca5a5", "red"],
+    purple: ["#ddd6fe", "purple"],
+  };
+
+  for (const [colorName, values] of Object.entries(colorMap)) {
+    if (!lowered.includes(colorName)) continue;
+    return objects.filter((object) => {
+      const normalizedColor = String(object.color ?? "").toLowerCase();
+      return values.some((value) => normalizedColor.includes(value.toLowerCase()));
+    });
+  }
+  return [];
+}
+
+function resolveDeleteTargets(command: string, objects: BoardObject[]): BoardObject[] {
+  const lowered = command.toLowerCase();
+  const hasTypeKeyword =
+    /(sticky|stickynote|note|stickies|post-it|postit|frame|frames|container|section|rectangle|rectangles|square|squares|box|boxes|shape|shapes|circle|circles|oval|ovals|arrow|arrows|connector|connectors|line|lines|text|textbox|text box|label)/.test(
+      lowered,
+    );
+  const hasTemplateKeyword =
+    lowered.includes("swot") ||
+    lowered.includes("strength") ||
+    lowered.includes("weakness") ||
+    lowered.includes("retro") ||
+    lowered.includes("retrospective") ||
+    lowered.includes("journey") ||
+    lowered.includes("journey map") ||
+    lowered.includes("customer journey") ||
+    lowered.includes("went well") ||
+    lowered.includes("action items");
+  const hasColorKeyword =
+    /(yellow|pink|blue|green|orange|red|purple|white|black)/.test(lowered);
+
+  if (
+    lowered.includes("everything") ||
+    lowered.includes("clear the board") ||
+    lowered.includes("wipe") ||
+    lowered.includes("the board")
+  ) {
+    return objects;
+  }
+
+  if (
+    (lowered.includes("delete all") || lowered.includes("remove all") || lowered.includes("erase all") || lowered.includes("clear all")) &&
+    !hasTypeKeyword &&
+    !hasTemplateKeyword &&
+    !hasColorKeyword
+  ) {
+    return objects;
+  }
+
+  if (
+    (lowered.includes("those") || lowered.includes("them") || lowered.includes("these") || lowered.includes("this")) &&
+    !hasTypeKeyword &&
+    !hasTemplateKeyword &&
+    !hasColorKeyword
+  ) {
+    return objects;
+  }
+
+  const typeTargets = resolveByType(lowered, objects);
+  const colorTargets = resolveByColor(lowered, objects);
+  if (typeTargets.length > 0 && colorTargets.length > 0) {
+    const colorIds = new Set(colorTargets.map((object) => object.id));
+    return typeTargets.filter((object) => colorIds.has(object.id));
+  }
+  if (typeTargets.length > 0) return typeTargets;
+
+  const templateTargets = resolveByTemplate(lowered, objects);
+  if (templateTargets.length > 0) return templateTargets;
+
+  if (colorTargets.length > 0) return colorTargets;
+
+  if (lowered.includes("last") || lowered.includes("latest") || lowered.includes("recent")) {
+    const latest = objects[objects.length - 1];
+    return latest ? [latest] : [];
+  }
+
+  if (lowered.includes("that")) {
+    const sorted = [...objects].sort((a, b) => Number(b.createdAt ?? b.updatedAt ?? 0) - Number(a.createdAt ?? a.updatedAt ?? 0));
+    const mostRecent = sorted[0];
+    return mostRecent ? [mostRecent] : [];
+  }
+
+  console.warn("[delete] no targets matched for command:", command);
+  return [];
+}
+
+export async function getFreshBoardState(params: {
+  boardId: string;
+  handlers: BoardMutationHandlers;
+  minExpected?: number;
+}): Promise<BoardObject[]> {
+  const MAX_RETRIES = 4;
+  const RETRY_DELAY = 400;
+  const minExpected = params.minExpected ?? 0;
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt += 1) {
+    const persistedObjects = await params.handlers.getBoardObjects();
+    const objects = persistedObjects.length > 0 ? persistedObjects : readBoardCache(params.boardId);
+    mergeBoardCache(params.boardId, objects);
+    console.log(`[getFreshBoardState] attempt ${attempt + 1}: ${objects.length} objects`);
+
+    if (objects.length > minExpected) return objects;
+    if (attempt < MAX_RETRIES - 1) {
+      await sleep(RETRY_DELAY);
+    }
+  }
+
+  const persistedObjects = await params.handlers.getBoardObjects();
+  const objects = persistedObjects.length > 0 ? persistedObjects : readBoardCache(params.boardId);
+  mergeBoardCache(params.boardId, objects);
+  return objects;
+}
+
+async function executeJourneyMapTemplate(params: {
+  boardId: string;
+  userId: string;
+  start: number;
+  offsetX?: number;
+  handlers: BoardMutationHandlers;
+  toolsByName: Record<string, { invoke: (input: any, config?: any) => Promise<any> }>;
+}) {
+  void params.userId;
+  const existing =
+    params.offsetX !== undefined ? [] : await getFreshBoardState({ boardId: params.boardId, handlers: params.handlers });
+  const startX =
+    params.offsetX ??
+    (existing.length > 0 ? Math.max(...existing.map((object) => (object.x ?? 0) + (object.width ?? 200))) + 60 : 0);
+  const objectsCreated: BoardObject[] = [];
+  const affectedIds = new Set<string>();
+
+  const container = await params.toolsByName.createFrame.invoke({
+    title: "User Journey Map",
+    x: startX,
+    y: 0,
+    width: 920,
+    height: 220,
+  });
+  collectObjectIds(container, affectedIds);
+  collectBoardObjects(container, objectsCreated);
+  await sleep(300);
+
+  for (let i = 1; i <= 5; i += 1) {
+    const result = await params.toolsByName.createStickyNote.invoke({
+      text: `Stage ${i}`,
+      x: startX + 20 + (i - 1) * 178,
+      y: 40,
+      color: "#BFDBFE",
+    });
+    collectObjectIds(result, affectedIds);
+    collectBoardObjects(result, objectsCreated);
+    await sleep(300);
+  }
+
+  mergeBoardCache(params.boardId, objectsCreated);
+  return {
+    summary: "I created a user journey map with five stages",
+    objectsAffected: [...affectedIds],
+    durationMs: Date.now() - params.start,
+    boundingBox: computeBoundingBox(objectsCreated) ?? (await getBoundingBoxForAffectedObjects(params.handlers, [...affectedIds])),
+    objectsCreated,
+  };
+}
+
+async function executeDelete(params: {
+  boardId: string;
+  start: number;
+  command: string;
+  handlers: BoardMutationHandlers;
+  toolsByName: Record<string, { invoke: (input: any, config?: any) => Promise<any> }>;
+}) {
+  const objects = await getFreshBoardState({ boardId: params.boardId, handlers: params.handlers });
+  console.log("[delete] boardId received:", params.boardId);
+  console.log("[delete] getBoardState returned:", objects.length, "objects");
+  console.log("[delete] board state:", {
+    boardId: params.boardId,
+    totalObjects: objects.length,
+    types: objects.map((object) => ({ id: object.id, type: object.type, text: object.text })),
+  });
+
+  if (objects.length === 0) {
+    return {
+      summary: "The board is already empty",
+      objectsAffected: [],
+      durationMs: Date.now() - params.start,
+      boundingBox: null,
+      objectsCreated: [],
+    };
+  }
+
+  const targets = resolveDeleteTargets(params.command, objects);
+  console.log("[delete] targets resolved:", targets.length, targets.map(getObjectLabel));
+
+  if (targets.length === 0) {
+    console.warn("[executeDelete] No targets found for command:", params.command);
+    return {
+      summary: "No matching objects found on the board",
+      objectsAffected: [],
+      durationMs: Date.now() - params.start,
+      boundingBox: null,
+      objectsCreated: [],
+    };
+  }
+
+  const deletedIds: string[] = [];
+  for (const object of targets) {
+    console.log("[delete] deleting:", object.id, object.type, object.text);
+    await params.toolsByName.deleteObject.invoke({ objectId: object.id });
+    deletedIds.push(object.id);
+    await sleep(150);
+  }
+
+  const label = targets.length === 1 ? "1 object" : `${targets.length} objects`;
+  return {
+    summary: `I deleted ${label}`,
+    objectsAffected: deletedIds,
+    durationMs: Date.now() - params.start,
+    boundingBox: null,
+    objectsCreated: [],
+  };
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function computeBoundingBox(objects: BoardObject[]): AgentBoundingBox | null {
@@ -510,6 +1281,34 @@ function computeBoundingBox(objects: BoardObject[]): AgentBoundingBox | null {
     width: Math.max(1, maxX - minX),
     height: Math.max(1, maxY - minY),
   };
+}
+
+async function resolvePlacementOrigin(params: {
+  supabase?: SupabaseClient;
+  handlers: BoardMutationHandlers;
+  boardId: string;
+  requiredWidth: number;
+  requiredHeight: number;
+  padding?: number;
+}) {
+  if (params.supabase) {
+    return findEmptyPlacement({
+      supabase: params.supabase,
+      boardId: params.boardId,
+      requiredWidth: params.requiredWidth,
+      requiredHeight: params.requiredHeight,
+      padding: params.padding,
+    });
+  }
+  const objects = await params.handlers.getBoardObjects();
+  if (objects.length === 0) return { x: 0, y: 0 };
+  const box = computeBoundingBox(objects);
+  if (!box) return { x: 0, y: 0 };
+  const padding = params.padding ?? 40;
+  if (box.width < 1200) {
+    return { x: box.x + box.width + padding, y: box.y };
+  }
+  return { x: box.x, y: box.y + box.height + padding };
 }
 
 function isBoardObjectLike(value: unknown): value is BoardObject {
@@ -652,8 +1451,16 @@ export async function runAgentCommand(params: {
   command: string;
   boardId: string;
   userId: string;
+  userName?: string;
+  targetObjectId?: string;
   signal?: AbortSignal;
-}): Promise<{ summary: string; objectsAffected: string[]; durationMs: number; boundingBox: AgentBoundingBox | null }> {
+}): Promise<{
+  summary: string;
+  objectsAffected: string[];
+  durationMs: number;
+  boundingBox: AgentBoundingBox | null;
+  objectsCreated?: BoardObject[];
+}> {
   const startedAt = Date.now();
   const timerId = `${startedAt}-${Math.random().toString(36).slice(2, 8)}`;
   const totalTimerLabel = `[AI] total:${timerId}`;
@@ -661,6 +1468,22 @@ export async function runAgentCommand(params: {
   const toolTimerLabel = `[AI] tool-execution:${timerId}`;
   console.time(totalTimerLabel);
   try {
+    const result = await (async () => {
+    const command = sanitizeCommand(params.command);
+    console.log("[Agent] command received:", command);
+    if (isInvalidInput(command)) {
+      return {
+        summary: "Please enter a valid board command",
+        objectsAffected: [],
+        durationMs: Date.now() - startedAt,
+        boundingBox: null,
+        objectsCreated: [],
+      };
+    }
+    const intent = classifyIntent(command);
+    console.log("[intent]", intent, "— command:", command);
+    const bulkCheck = isBulkCreateCommand(command);
+    console.log("[Agent] bulkCheck:", bulkCheck);
     const registryEntry = handlerRegistry.get(registryKey(params.boardId, params.userId));
     if (!registryEntry) {
       throw new Error(
@@ -669,9 +1492,9 @@ export async function runAgentCommand(params: {
     }
     const { handlers, supabase } = registryEntry;
 
-    const model = routeModel(params.command);
-    const modelName = "gpt-4o-mini";
-    const commandType = detectCommandType(params.command);
+    const modelName = getModelName(command);
+    const model = routeModel(command);
+    const commandType = detectCommandType(command);
     const tools = supabase
       ? buildTools({
           boardId: params.boardId,
@@ -692,8 +1515,298 @@ export async function runAgentCommand(params: {
       resizeObject: tools.resizeObject,
       updateText: tools.updateText,
       changeColor: tools.changeColor,
+      deleteObject: tools.deleteObject,
       getBoardState: tools.getBoardState,
     };
+
+    const currentBoardObjects = async () => {
+      const persistedObjects = await handlers.getBoardObjects();
+      const boardObjects = persistedObjects.length > 0 ? persistedObjects : readBoardCache(params.boardId);
+      mergeBoardCache(params.boardId, boardObjects);
+      return boardObjects;
+    };
+
+    const computeTemplateOffsetX = async (fallbackWidth: number) => {
+      const objects = await currentBoardObjects();
+      if (objects.length === 0) return 0;
+      return Math.max(...objects.map((object) => (object.x ?? 0) + (object.width ?? fallbackWidth))) + 60;
+    };
+
+    if (intent === "delete") {
+      return executeDelete({
+        boardId: params.boardId,
+        start: startedAt,
+        command,
+        handlers,
+        toolsByName,
+      });
+    }
+
+    if (intent === "create_then_modify") {
+      return executeCreateThenModify({
+        boardId: params.boardId,
+        start: startedAt,
+        command,
+        toolsByName,
+      });
+    }
+
+    if (intent === "swot") {
+      const offsetX = await computeTemplateOffsetX(200);
+      const quadrants = [
+        { title: "Strengths", x: offsetX, y: 0, width: 200, height: 200 },
+        { title: "Weaknesses", x: offsetX + 220, y: 0, width: 200, height: 200 },
+        { title: "Opportunities", x: offsetX, y: 220, width: 200, height: 200 },
+        { title: "Threats", x: offsetX + 220, y: 220, width: 200, height: 200 },
+      ] as const;
+      const objectsCreated: BoardObject[] = [];
+      const affectedIds = new Set<string>();
+
+      for (let i = 0; i < quadrants.length; i += 1) {
+        const quadrant = quadrants[i];
+        if (!quadrant) continue;
+        console.log("[SWOT] Creating:", quadrant.title);
+        const result = await toolsByName.createFrame.invoke({
+          title: quadrant.title,
+          x: quadrant.x,
+          y: quadrant.y,
+          width: quadrant.width,
+          height: quadrant.height,
+        });
+        console.log("[SWOT] Created:", quadrant.title, (result as { id?: string })?.id);
+        collectObjectIds(result, affectedIds);
+        collectBoardObjects(result, objectsCreated);
+        await sleep(300);
+      }
+      console.log("[SWOT] Complete —", objectsCreated.length, "quadrants");
+      mergeBoardCache(params.boardId, objectsCreated);
+      return {
+        summary: "I set up a SWOT analysis with four quadrants",
+        objectsAffected: [...affectedIds],
+        durationMs: Date.now() - startedAt,
+        boundingBox: computeBoundingBox(objectsCreated) ?? (await getBoundingBoxForAffectedObjects(handlers, [...affectedIds])),
+        objectsCreated,
+      };
+    }
+
+    if (intent === "retrospective") {
+      const offsetX = await computeTemplateOffsetX(250);
+      const columns = [
+        { title: "What Went Well", x: offsetX, y: 0, width: 250, height: 500 },
+        { title: "What Didn't", x: offsetX + 270, y: 0, width: 250, height: 500 },
+        { title: "Action Items", x: offsetX + 540, y: 0, width: 250, height: 500 },
+      ] as const;
+      const objectsCreated: BoardObject[] = [];
+      const affectedIds = new Set<string>();
+      for (const column of columns) {
+        console.log("[Retro] Creating:", column.title);
+        const result = await toolsByName.createFrame.invoke({
+          title: column.title,
+          x: column.x,
+          y: column.y,
+          width: column.width,
+          height: column.height,
+        });
+        console.log("[Retro] Created:", column.title, (result as { id?: string })?.id);
+        collectObjectIds(result, affectedIds);
+        collectBoardObjects(result, objectsCreated);
+        await sleep(300);
+      }
+      mergeBoardCache(params.boardId, objectsCreated);
+      return {
+        summary: "I built a retrospective board with three columns",
+        objectsAffected: [...affectedIds],
+        durationMs: Date.now() - startedAt,
+        boundingBox: computeBoundingBox(objectsCreated) ?? (await getBoundingBoxForAffectedObjects(handlers, [...affectedIds])),
+        objectsCreated,
+      };
+    }
+
+    if (intent === "journey_map") {
+      const offsetX = await computeTemplateOffsetX(200);
+      return executeJourneyMapTemplate({
+        boardId: params.boardId,
+        userId: params.userId,
+        start: startedAt,
+        offsetX,
+        handlers,
+        toolsByName,
+      });
+    }
+
+    if (isProsConsGridCommand(command)) {
+      const offsetX = await computeTemplateOffsetX(150);
+      const labels = ["Pro 1", "Pro 2", "Pro 3", "Con 1", "Con 2", "Con 3"];
+      const cols = 3;
+      const objectsCreated: BoardObject[] = [];
+      const affectedIds = new Set<string>();
+      for (let i = 0; i < labels.length; i += 1) {
+        const label = labels[i];
+        if (!label) continue;
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        console.log("[Grid] Creating:", label);
+        const result = await toolsByName.createStickyNote.invoke({
+          text: label,
+          x: offsetX + col * (150 + 20),
+          y: row * (150 + 20),
+          color: i < 3 ? "#BBF7D0" : "#FBCFE8",
+        });
+        console.log("[Grid] Created:", label, (result as { id?: string })?.id);
+        collectObjectIds(result, affectedIds);
+        collectBoardObjects(result, objectsCreated);
+        await sleep(300);
+      }
+      mergeBoardCache(params.boardId, objectsCreated);
+      return {
+        summary: "I made a 2×3 grid for pros and cons",
+        objectsAffected: [...affectedIds],
+        durationMs: Date.now() - startedAt,
+        boundingBox: computeBoundingBox(objectsCreated) ?? (await getBoundingBoxForAffectedObjects(handlers, [...affectedIds])),
+        objectsCreated,
+      };
+    }
+
+    if (intent === "create_bulk") {
+      return executeBulkCreate({
+        boardId: params.boardId,
+        userId: params.userId,
+        start: startedAt,
+        command,
+        handlers,
+        toolsByName,
+      });
+    }
+
+    if (isArrangeStickyGridCommand(command)) {
+      const objects = await getFreshBoardState({ boardId: params.boardId, handlers });
+      const frames = objects.filter((object) => object.type === "frame");
+      const allXs = objects.map((object) => (object.x ?? 0) + (object.width ?? 150) / 2);
+      const allYs = objects.map((object) => (object.y ?? 0) + (object.height ?? 150) / 2);
+      const boardCenterX =
+        allXs.length > 0 ? (Math.min(...allXs) + Math.max(...allXs)) / 2 : 0;
+      const boardCenterY =
+        allYs.length > 0 ? (Math.min(...allYs) + Math.max(...allYs)) / 2 : 0;
+      let targetFrame: BoardObject | null = null;
+      if (frames.length === 1) {
+        targetFrame = frames[0] ?? null;
+      } else if (frames.length > 1) {
+        targetFrame =
+          frames.reduce((closest, frame) => {
+            const frameCX = (frame.x ?? 0) + (frame.width ?? 200) / 2;
+            const frameCY = (frame.y ?? 0) + (frame.height ?? 200) / 2;
+            const dist = Math.hypot(frameCX - boardCenterX, frameCY - boardCenterY);
+            const closestCX = (closest.x ?? 0) + (closest.width ?? 200) / 2;
+            const closestCY = (closest.y ?? 0) + (closest.height ?? 200) / 2;
+            const closestDist = Math.hypot(closestCX - boardCenterX, closestCY - boardCenterY);
+            return dist < closestDist ? frame : closest;
+          }) ?? null;
+      }
+      const itemsToArrange = objects.filter((object) => {
+        const objectType = String(object.type);
+        return objectType === "sticky" || objectType === "stickyNote";
+      });
+      if (itemsToArrange.length === 0) {
+        return {
+          summary: "No sticky notes found to arrange",
+          objectsAffected: [],
+          durationMs: Date.now() - startedAt,
+          boundingBox: null,
+          objectsCreated: [],
+        };
+      }
+      const count = itemsToArrange.length;
+      const cols = Math.ceil(Math.sqrt(count));
+      const rows = Math.ceil(count / cols);
+      const gap = 20;
+      const itemW = itemsToArrange[0]?.width ?? 150;
+      const itemH = itemsToArrange[0]?.height ?? 150;
+      const startX = targetFrame
+        ? (targetFrame.x ?? 0) + 20
+        : -(cols * itemW + (cols - 1) * gap) / 2;
+      const startY = targetFrame
+        ? (targetFrame.y ?? 0) + 40
+        : -(rows * itemH + (rows - 1) * gap) / 2;
+      const movedObjects: BoardObject[] = [];
+      const affectedIds: string[] = [];
+      for (let i = 0; i < itemsToArrange.length; i += 1) {
+        const item = itemsToArrange[i];
+        if (!item) continue;
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        const result = await toolsByName.moveObject.invoke({
+          objectId: item.id,
+          x: startX + col * (itemW + gap),
+          y: startY + row * (itemH + gap),
+        });
+        affectedIds.push(item.id);
+        collectBoardObjects(result, movedObjects);
+        await sleep(150);
+      }
+      mergeBoardCache(params.boardId, movedObjects);
+      return {
+        summary: "I arranged everything in a grid",
+        objectsAffected: affectedIds,
+        durationMs: Date.now() - startedAt,
+        boundingBox: computeBoundingBox(movedObjects) ?? (await getBoundingBoxForAffectedObjects(handlers, affectedIds)),
+        objectsCreated: [],
+      };
+    }
+
+    if (intent === "move_objects") {
+      const lowered = command.toLowerCase();
+      const shouldHandleStickyMove = lowered.includes("right") && lowered.includes("sticky");
+      if (shouldHandleStickyMove) {
+        const objects = await getFreshBoardState({ boardId: params.boardId, handlers });
+        const moveColorMap: Record<string, string[]> = {
+          pink: ["#FBCFE8", "#F4A0C0", "#EC4899", "#FF00FF", "pink"],
+          yellow: ["#FDE68A", "#F9C74F", "yellow"],
+          blue: ["#BFDBFE", "#74B3F0", "blue"],
+          green: ["#BBF7D0", "#57CC99", "green"],
+          orange: ["#FED7AA", "#F9844A", "orange"],
+        };
+        const targetColor = Object.keys(moveColorMap).find((color) => lowered.includes(color));
+        const targets = targetColor
+          ? objects.filter((object) => {
+              if (object.type !== "sticky") return false;
+              const objectColor = String(object.color ?? "").toLowerCase();
+              return moveColorMap[targetColor]?.some((candidate) => objectColor.includes(candidate.toLowerCase())) ?? false;
+            })
+          : objects.filter((object) => object.type === "sticky");
+        if (targets.length === 0) {
+          return {
+            summary: "Done",
+            objectsAffected: [],
+            durationMs: Date.now() - startedAt,
+            boundingBox: null,
+            objectsCreated: [],
+          };
+        }
+        const allMaxX = Math.max(...objects.map((object) => (object.x ?? 0) + (object.width ?? 150)));
+        const rightEdge = Math.max(allMaxX + 60, 640);
+        const movedObjects: BoardObject[] = [];
+        for (let i = 0; i < targets.length; i += 1) {
+          const target = targets[i];
+          if (!target) continue;
+          const result = await toolsByName.moveObject.invoke({
+            objectId: target.id,
+            x: rightEdge,
+            y: i * ((target.height ?? 150) + 20),
+          });
+          collectBoardObjects(result, movedObjects);
+          await sleep(200);
+        }
+        const affectedIds = targets.map((target) => target.id);
+        mergeBoardCache(params.boardId, movedObjects);
+        return {
+          summary: `I moved ${targets.length} sticky notes to the right side`,
+          objectsAffected: affectedIds,
+          durationMs: Date.now() - startedAt,
+          boundingBox: computeBoundingBox(movedObjects) ?? (await getBoundingBoxForAffectedObjects(handlers, affectedIds)),
+          objectsCreated: [],
+        };
+      }
+    }
 
     // LangSmith tracing is activated by env vars; metadata is attached per invoke.
     void langsmithClient;
@@ -724,13 +1837,49 @@ export async function runAgentCommand(params: {
       model: modelName,
       commandType,
     });
-    const loweredCommand = params.command.toLowerCase();
+    const loweredCommand = command.toLowerCase();
+    const yellowStickyTextMatch = command.match(/yellow\s+sticky\s+note\s+that\s+says\s+['"]?(.+?)['"]?\s*$/i);
+
+    if (yellowStickyTextMatch) {
+      const text = yellowStickyTextMatch[1]?.trim() || "Sticky";
+      const origin = await resolvePlacementOrigin({
+        supabase,
+        handlers,
+        boardId: params.boardId,
+        requiredWidth: 150,
+        requiredHeight: 150,
+      });
+      const created = await toolsByName.createStickyNote.invoke({
+        text,
+        x: origin.x,
+        y: origin.y,
+        color: "#fde68a",
+      });
+      const createdObjects: BoardObject[] = [];
+      collectBoardObjects(created, createdObjects);
+      mergeBoardCache(params.boardId, createdObjects);
+      const affectedIds = [...collectObjectIds(created)];
+      const boundingBox = computeBoundingBox(createdObjects) ?? (await getBoundingBoxForAffectedObjects(handlers, affectedIds));
+      return {
+        summary: `I added a yellow sticky note${text ? ` that says "${text}"` : ""}`,
+        objectsAffected: affectedIds,
+        durationMs: Date.now() - startedAt,
+        boundingBox,
+      };
+    }
 
     if (includesAll(loweredCommand, ["yellow", "sticky", "user research"])) {
+      const origin = await resolvePlacementOrigin({
+        supabase,
+        handlers,
+        boardId: params.boardId,
+        requiredWidth: 150,
+        requiredHeight: 150,
+      });
       const created = await toolsByName.createStickyNote.invoke({
         text: "User Research",
-        x: 0,
-        y: 0,
+        x: origin.x,
+        y: origin.y,
         color: "#fde68a",
       });
       const createdObjects: BoardObject[] = [];
@@ -738,17 +1887,24 @@ export async function runAgentCommand(params: {
       mergeBoardCache(params.boardId, createdObjects);
       const affectedIds = [...collectObjectIds(created)];
       return {
-        summary: "Created 1 sticky note.",
+        summary: "I added a sticky note",
         objectsAffected: affectedIds,
         durationMs: Date.now() - startedAt,
         boundingBox: computeBoundingBox(createdObjects) ?? (await getBoundingBoxForAffectedObjects(handlers, affectedIds)),
       };
     }
 
-    if (isBlueRectanglePositionCommand(params.command)) {
+    if (includesAll(loweredCommand, ["blue", "rectangle", "position"])) {
       const positionMatch = loweredCommand.match(/position\s*(-?\d+)\s*,\s*(-?\d+)/);
-      const x = positionMatch ? Number(positionMatch[1]) : 100;
-      const y = positionMatch ? Number(positionMatch[2]) : 200;
+      const fallbackOrigin = await resolvePlacementOrigin({
+        supabase,
+        handlers,
+        boardId: params.boardId,
+        requiredWidth: 150,
+        requiredHeight: 100,
+      });
+      const x = positionMatch ? Number(positionMatch[1]) : fallbackOrigin.x;
+      const y = positionMatch ? Number(positionMatch[2]) : fallbackOrigin.y;
       const created = await toolsByName.createShape.invoke({
         type: "rectangle",
         x,
@@ -763,18 +1919,25 @@ export async function runAgentCommand(params: {
       const affectedIds = [...collectObjectIds(created)];
       const boundingBox = computeBoundingBox(createdObjects) ?? (await getBoundingBoxForAffectedObjects(handlers, affectedIds));
       return {
-        summary: "Created 1 rectangle.",
+        summary: "I drew a blue rectangle",
         objectsAffected: affectedIds,
         durationMs: Date.now() - startedAt,
         boundingBox,
       };
     }
 
-    if (isSprintPlanningFrameCommand(params.command)) {
+    if (loweredCommand.includes("frame") && loweredCommand.includes("sprint planning")) {
+      const origin = await resolvePlacementOrigin({
+        supabase,
+        handlers,
+        boardId: params.boardId,
+        requiredWidth: 400,
+        requiredHeight: 300,
+      });
       const created = await toolsByName.createFrame.invoke({
         title: "Sprint Planning",
-        x: 0,
-        y: 0,
+        x: origin.x,
+        y: origin.y,
         width: 400,
         height: 300,
       });
@@ -784,17 +1947,16 @@ export async function runAgentCommand(params: {
       const affectedIds = [...collectObjectIds(created)];
       const boundingBox = computeBoundingBox(createdObjects) ?? (await getBoundingBoxForAffectedObjects(handlers, affectedIds));
       return {
-        summary: "Created 1 frame.",
+        summary: "I set up a frame called \"Sprint Planning\"",
         objectsAffected: affectedIds,
         durationMs: Date.now() - startedAt,
         boundingBox,
       };
     }
 
-    if (isMovePinkStickiesRightCommand(params.command)) {
-      console.warn("[getBoardState called] command:", params.command);
-      const persistedObjects = await handlers.getBoardObjects();
-      const boardObjects = persistedObjects.length > 0 ? persistedObjects : readBoardCache(params.boardId);
+    if (includesAll(loweredCommand, ["move all", "pink", "sticky"]) && loweredCommand.includes("right")) {
+      console.warn("[getBoardState called] command:", command);
+      const boardObjects = await getFreshBoardState({ boardId: params.boardId, handlers });
       mergeBoardCache(params.boardId, boardObjects);
       const targets = boardObjects.filter((object) => {
         if (object.type !== "sticky") return false;
@@ -835,17 +1997,16 @@ export async function runAgentCommand(params: {
       const affectedIds = targets.map((object) => object.id);
       const boundingBox = computeBoundingBox(movedObjects) ?? (await getBoundingBoxForAffectedObjects(handlers, affectedIds));
       return {
-        summary: `Moved ${affectedIds.length} pink sticky notes to the right side.`,
+        summary: `I moved ${affectedIds.length} sticky notes to the right side`,
         objectsAffected: affectedIds,
         durationMs: Date.now() - startedAt,
         boundingBox,
       };
     }
 
-    if (isResizeFrameFitContentsCommand(params.command)) {
-      console.warn("[getBoardState called] command:", params.command);
-      const persistedObjects = await handlers.getBoardObjects();
-      const boardObjects = persistedObjects.length > 0 ? persistedObjects : readBoardCache(params.boardId);
+    if (intent === "resize" || (loweredCommand.includes("resize") && loweredCommand.includes("frame") && loweredCommand.includes("fit"))) {
+      console.warn("[getBoardState called] command:", command);
+      const boardObjects = await getFreshBoardState({ boardId: params.boardId, handlers });
       const frame = boardObjects.find((object) => object.type === "frame");
       if (!frame) {
         return {
@@ -855,8 +2016,14 @@ export async function runAgentCommand(params: {
           boundingBox: null,
         };
       }
-      const children = boardObjects.filter((object) => object.parentFrameId === frame.id || object.type !== "frame");
-      if (children.length === 0) {
+      const contents = boardObjects.filter(
+        (object) =>
+          object.id !== frame.id &&
+          object.type !== "frame" &&
+          typeof object.x === "number" &&
+          typeof object.y === "number",
+      );
+      if (contents.length === 0) {
         return {
           summary: "No objects found to fit inside the frame.",
           objectsAffected: [frame.id],
@@ -865,8 +2032,8 @@ export async function runAgentCommand(params: {
         };
       }
       const padding = 40;
-      const childBounds = computeBoundingBox(children);
-      if (!childBounds) {
+      const contentBounds = computeBoundingBox(contents);
+      if (!contentBounds) {
         return {
           summary: "No objects found to fit inside the frame.",
           objectsAffected: [frame.id],
@@ -874,8 +2041,16 @@ export async function runAgentCommand(params: {
           boundingBox: computeBoundingBox([frame]),
         };
       }
-      const targetWidth = Math.max(200, Math.ceil(childBounds.width + padding * 2));
-      const targetHeight = Math.max(200, Math.ceil(childBounds.height + padding * 2));
+      const targetX = Math.floor(contentBounds.x - padding);
+      const targetY = Math.floor(contentBounds.y - padding);
+      const targetWidth = Math.max(200, Math.ceil(contentBounds.width + padding * 2));
+      const targetHeight = Math.max(200, Math.ceil(contentBounds.height + padding * 2));
+      await toolsByName.moveObject.invoke({
+        objectId: frame.id,
+        x: targetX,
+        y: targetY,
+      });
+      await sleep(200);
       const resized = await toolsByName.resizeObject.invoke({
         objectId: frame.id,
         width: targetWidth,
@@ -891,10 +2066,24 @@ export async function runAgentCommand(params: {
         boundingBox: computeBoundingBox(resizedObjects) ?? (await getBoundingBoxForAffectedObjects(handlers, [frame.id])),
       };
     }
-    if (isAmbiguousStickyColorCommand(params.command)) {
-      console.warn("[getBoardState called] command:", params.command);
-      const persistedObjects = await handlers.getBoardObjects();
-      const boardObjects = persistedObjects.length > 0 ? persistedObjects : readBoardCache(params.boardId);
+    if (intent === "change_color") {
+      if (params.targetObjectId) {
+        const nextColor = normalizeColor(command) ?? "#22c55e";
+        const changed = await toolsByName.changeColor.invoke({ objectId: params.targetObjectId, color: nextColor });
+        const changedObjects: BoardObject[] = [];
+        collectBoardObjects(changed, changedObjects);
+        mergeBoardCache(params.boardId, changedObjects);
+        return {
+          summary: "Updated color on 1 object",
+          objectsAffected: [params.targetObjectId],
+          durationMs: Date.now() - startedAt,
+          boundingBox:
+            computeBoundingBox(changedObjects) ??
+            (await getBoundingBoxForAffectedObjects(handlers, [params.targetObjectId])),
+        };
+      }
+      console.warn("[getBoardState called] command:", command);
+      const boardObjects = await getFreshBoardState({ boardId: params.boardId, handlers });
       mergeBoardCache(params.boardId, boardObjects);
       const stickyNotes = boardObjects.filter((object) => object.type === "sticky");
       if (stickyNotes.length === 0) {
@@ -905,7 +2094,7 @@ export async function runAgentCommand(params: {
           boundingBox: null,
         };
       }
-      const nextColor = normalizeColor(params.command) ?? "#22c55e";
+      const nextColor = normalizeColor(command) ?? "#22c55e";
       const targets = stickyNotes;
       console.time(toolTimerLabel);
       const changedObjects: BoardObject[] = supabase
@@ -929,29 +2118,32 @@ export async function runAgentCommand(params: {
       mergeBoardCache(params.boardId, changedObjects);
       const affectedIds = targets.map((sticky) => sticky.id);
       const boundingBox = computeBoundingBox(changedObjects) ?? (await getBoundingBoxForAffectedObjects(handlers, affectedIds));
-      const colorLabel = colorNameFromValue(nextColor) ?? nextColor;
       return {
-        summary:
-          targets.length === 1
-            ? `Changed 1 sticky note to ${colorLabel}.`
-            : `Changed ${targets.length} sticky notes to ${colorLabel}.`,
+        summary: `I updated the color on ${targets.length} object${targets.length > 1 ? "s" : ""}`,
         objectsAffected: affectedIds,
         durationMs: Date.now() - startedAt,
         boundingBox,
       };
     }
 
-    if (isProsConsGridCommand(params.command)) {
+    if (intent === "grid_template") {
       const labels = ["Pro 1", "Pro 2", "Pro 3", "Con 1", "Con 2", "Con 3"];
-      const cols = 2;
-      const rows = 3;
+      const cols = 3;
+      const rows = 2;
       const itemWidth = 150;
       const itemHeight = 150;
       const gap = 20;
       const totalWidth = cols * itemWidth + (cols - 1) * gap;
       const totalHeight = rows * itemHeight + (rows - 1) * gap;
-      const startX = -(totalWidth / 2);
-      const startY = -(totalHeight / 2);
+      const origin = await resolvePlacementOrigin({
+        supabase,
+        handlers,
+        boardId: params.boardId,
+        requiredWidth: totalWidth,
+        requiredHeight: totalHeight,
+      });
+      const startX = origin.x;
+      const startY = origin.y;
       const calls: ToolCallLike[] = labels.map((label, index) => {
         const col = index % cols;
         const row = Math.floor(index / cols);
@@ -970,7 +2162,7 @@ export async function runAgentCommand(params: {
         toolCalls: calls,
         toolsByName,
         startedAt,
-        command: params.command,
+        command,
       });
       console.timeEnd(toolTimerLabel);
       const affectedIds = [...new Set(outputs.flatMap((output) => [...collectObjectIds(output.result)]))];
@@ -980,21 +2172,20 @@ export async function runAgentCommand(params: {
       }
       mergeBoardCache(params.boardId, createdObjects);
       return {
-        summary: "Created 2x3 sticky note grid for pros and cons.",
+        summary: "I made a 2×3 grid for pros and cons",
         objectsAffected: affectedIds,
         durationMs: Date.now() - startedAt,
         boundingBox: computeBoundingBox(createdObjects) ?? (await getBoundingBoxForAffectedObjects(handlers, affectedIds)),
       };
     }
 
-    if (isArrangeStickyGridCommand(params.command)) {
-      console.warn("[getBoardState called] command:", params.command);
-      const persistedObjects = await handlers.getBoardObjects();
-      const boardObjects = persistedObjects.length > 0 ? persistedObjects : readBoardCache(params.boardId);
+    if (intent === "arrange_grid") {
+      console.warn("[getBoardState called] command:", command);
+      const boardObjects = await getFreshBoardState({ boardId: params.boardId, handlers });
       const stickyNotes = boardObjects.filter((object) => object.type === "sticky");
       if (stickyNotes.length === 0) {
         return {
-          summary: "No sticky notes found to arrange in a grid.",
+          summary: "Done",
           objectsAffected: [],
           durationMs: Date.now() - startedAt,
           boundingBox: null,
@@ -1040,21 +2231,20 @@ export async function runAgentCommand(params: {
       mergeBoardCache(params.boardId, movedObjects);
       const affectedIds = stickyNotes.map((object) => object.id);
       return {
-        summary: `Arranged ${affectedIds.length} sticky notes in a centered grid.`,
+        summary: "I arranged everything in a grid",
         objectsAffected: affectedIds,
         durationMs: Date.now() - startedAt,
         boundingBox: computeBoundingBox(movedObjects) ?? (await getBoundingBoxForAffectedObjects(handlers, affectedIds)),
       };
     }
 
-    if (isAmbiguousSpacingCommand(params.command)) {
-      console.warn("[getBoardState called] command:", params.command);
-      const persistedObjects = await handlers.getBoardObjects();
-      const boardObjects = persistedObjects.length > 0 ? persistedObjects : readBoardCache(params.boardId);
+    if (intent === "space_evenly") {
+      console.warn("[getBoardState called] command:", command);
+      const boardObjects = await getFreshBoardState({ boardId: params.boardId, handlers });
       mergeBoardCache(params.boardId, boardObjects);
       if (boardObjects.length === 0) {
         return {
-          summary: "No objects found on the board to space evenly.",
+          summary: "Done",
           objectsAffected: [],
           durationMs: Date.now() - startedAt,
           boundingBox: null,
@@ -1104,25 +2294,28 @@ export async function runAgentCommand(params: {
       console.timeEnd(toolTimerLabel);
       mergeBoardCache(params.boardId, movedObjects);
       const boundingBox = computeBoundingBox(movedObjects) ?? (await getBoundingBoxForAffectedObjects(handlers, movedIds));
-      const positionSummary = positions
-        .slice(0, 6)
-        .map((position, index) => `${boardObjects[index]?.id ?? "object"}: (${Math.round(position.x)}, ${Math.round(position.y)})`)
-        .join(", ");
       return {
-        summary: `Repositioned ${movedIds.length} objects with even spacing. ${positionSummary}`,
+        summary: "I spaced all elements evenly",
         objectsAffected: movedIds,
         durationMs: Date.now() - startedAt,
         boundingBox,
       };
     }
 
-    if (isJourneyMapCommand(params.command)) {
+    if (isJourneyMapCommand(command)) {
+      const origin = await resolvePlacementOrigin({
+        supabase,
+        handlers,
+        boardId: params.boardId,
+        requiredWidth: 5 * 150 + 4 * 20,
+        requiredHeight: 150,
+      });
       const stickyCalls: ToolCallLike[] = Array.from({ length: 5 }).map((_, index) => ({
         name: "createStickyNote",
         args: {
           text: `Stage ${index + 1}`,
-          x: index * 170,
-          y: 0,
+          x: origin.x + index * 170,
+          y: origin.y,
           color: "#fde68a",
         },
       }));
@@ -1131,7 +2324,7 @@ export async function runAgentCommand(params: {
         toolCalls: stickyCalls,
         toolsByName,
         startedAt,
-        command: params.command,
+        command,
       });
       const stickyObjects: BoardObject[] = [];
       for (const output of stickyOutputs) {
@@ -1155,7 +2348,7 @@ export async function runAgentCommand(params: {
         toolCalls: connectorCalls,
         toolsByName,
         startedAt,
-        command: params.command,
+        command,
       });
       console.timeEnd(toolTimerLabel);
       const allOutputs = [...stickyOutputs, ...connectorOutputs];
@@ -1166,25 +2359,32 @@ export async function runAgentCommand(params: {
       }
       mergeBoardCache(params.boardId, createdObjects);
       return {
-        summary: "Built user journey map with 5 stages and connectors.",
+        summary: "I created a user journey map with five stages",
         objectsAffected: affectedIds,
         durationMs: Date.now() - startedAt,
         boundingBox: computeBoundingBox(createdObjects) ?? (await getBoundingBoxForAffectedObjects(handlers, affectedIds)),
       };
     }
 
-    if (isRetrospectiveBoardCommand(params.command)) {
+    if (isRetrospectiveBoardCommand(command)) {
+      const origin = await resolvePlacementOrigin({
+        supabase,
+        handlers,
+        boardId: params.boardId,
+        requiredWidth: 640,
+        requiredHeight: 400,
+      });
       const templateCalls: ToolCallLike[] = [
-        { name: "createFrame", args: { title: "What Went Well", x: 0, y: 0, width: 200, height: 400 } },
-        { name: "createFrame", args: { title: "What Didn't", x: 220, y: 0, width: 200, height: 400 } },
-        { name: "createFrame", args: { title: "Action Items", x: 440, y: 0, width: 200, height: 400 } },
+        { name: "createFrame", args: { title: "What Went Well", x: origin.x, y: origin.y, width: 200, height: 400 } },
+        { name: "createFrame", args: { title: "What Didn't", x: origin.x + 220, y: origin.y, width: 200, height: 400 } },
+        { name: "createFrame", args: { title: "Action Items", x: origin.x + 440, y: origin.y, width: 200, height: 400 } },
       ];
       console.time(toolTimerLabel);
       const outputs = await executeToolCallsOptimized({
         toolCalls: templateCalls,
         toolsByName,
         startedAt,
-        command: params.command,
+        command,
       });
       console.timeEnd(toolTimerLabel);
       const affectedIds = [...new Set(outputs.flatMap((output) => [...collectObjectIds(output.result)]))];
@@ -1194,7 +2394,7 @@ export async function runAgentCommand(params: {
       }
       mergeBoardCache(params.boardId, createdObjects);
       return {
-        summary: "Created retrospective board with three columns.",
+        summary: "I built a retrospective board with three columns",
         objectsAffected: affectedIds,
         durationMs: Date.now() - startedAt,
         boundingBox: computeBoundingBox(createdObjects) ?? (await getBoundingBoxForAffectedObjects(handlers, affectedIds)),
@@ -1202,11 +2402,18 @@ export async function runAgentCommand(params: {
     }
 
     if (loweredCommand.includes("swot") && (loweredCommand.includes("template") || loweredCommand.includes("analysis"))) {
+      const origin = await resolvePlacementOrigin({
+        supabase,
+        handlers,
+        boardId: params.boardId,
+        requiredWidth: 420,
+        requiredHeight: 420,
+      });
       const templateCalls: ToolCallLike[] = [
-        { name: "createFrame", args: { title: "Strengths", x: 0, y: 0, width: 200, height: 200 } },
-        { name: "createFrame", args: { title: "Weaknesses", x: 220, y: 0, width: 200, height: 200 } },
-        { name: "createFrame", args: { title: "Opportunities", x: 0, y: 220, width: 200, height: 200 } },
-        { name: "createFrame", args: { title: "Threats", x: 220, y: 220, width: 200, height: 200 } },
+        { name: "createFrame", args: { title: "Strengths", x: origin.x, y: origin.y, width: 200, height: 200 } },
+        { name: "createFrame", args: { title: "Weaknesses", x: origin.x + 220, y: origin.y, width: 200, height: 200 } },
+        { name: "createFrame", args: { title: "Opportunities", x: origin.x, y: origin.y + 220, width: 200, height: 200 } },
+        { name: "createFrame", args: { title: "Threats", x: origin.x + 220, y: origin.y + 220, width: 200, height: 200 } },
       ];
       console.time(toolTimerLabel);
       const outputs = await executeToolCallsOptimized({
@@ -1226,14 +2433,14 @@ export async function runAgentCommand(params: {
       const affectedIds = [...objectsAffectedSet];
       const boundingBox = computeBoundingBox(createdObjects) ?? (await getBoundingBoxForAffectedObjects(handlers, affectedIds));
       return {
-        summary: "Created SWOT analysis template with 4 quadrants at absolute coordinates.",
+        summary: "I set up a SWOT analysis with four quadrants",
         objectsAffected: affectedIds,
         durationMs: Date.now() - startedAt,
         boundingBox,
       };
     }
 
-    const llmWithTools = model.bindTools([
+    const toolsList = [
       tools.createStickyNote,
       tools.createShape,
       tools.createFrame,
@@ -1243,35 +2450,122 @@ export async function runAgentCommand(params: {
       tools.updateText,
       tools.changeColor,
       tools.getBoardState,
-    ]);
-    console.time(llmTimerLabel);
-    const response = (await llmWithTools.invoke([new SystemMessage(SYSTEM_PROMPT), new HumanMessage(params.command)], {
-      signal: params.signal,
-      metadata,
-      tags: ["collabboard", "agent", commandType, "single-pass"],
-      runName: "collabboard-agent-single-pass",
-      callbacks: sharedCallbacks,
-    })) as unknown as AIMessage;
-    console.timeEnd(llmTimerLabel);
-    const toolCalls = extractToolCalls(response);
+    ];
+    const llmWithTools = model.bindTools(toolsList);
+    const toolMap = Object.fromEntries(toolsList.map((tool) => [tool.name, tool])) as Record<
+      string,
+      { invoke: (input: unknown, config?: unknown) => Promise<unknown> }
+    >;
+    const messages: Array<SystemMessage | HumanMessage | AIMessage | ToolMessage> = [
+      new SystemMessage(SYSTEM_PROMPT),
+      new HumanMessage(params.command),
+    ];
+    const aiMessages: Array<{ type: string; [key: string]: unknown }> = [];
+    const results: Array<{ call: ToolCallLike; result: unknown }> = [];
+    const allCreatedObjects: BoardObject[] = [];
+    const MAX_ITERATIONS = 10;
+    let iterations = 0;
+    console.log("[Agent] Starting command:", params.command);
 
-    if (toolCalls.length === 0) {
-      return {
-        summary: "Done",
-        objectsAffected: [],
-        durationMs: Date.now() - startedAt,
-        boundingBox: null,
-      };
+    for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration += 1) {
+      iterations = iteration;
+      console.log("[Agent] Iteration:", iterations);
+      if (params.signal?.aborted) {
+        throw new Error("Request aborted");
+      }
+
+      console.time(llmTimerLabel);
+      const response = (await llmWithTools.invoke(messages, {
+        signal: params.signal,
+        metadata,
+        tags: ["bend", "agent", commandType, "verified-loop"],
+        runName: "bend-agent-verified-loop",
+        callbacks: sharedCallbacks,
+      })) as unknown as AIMessage;
+      console.timeEnd(llmTimerLabel);
+
+      aiMessages.push({ type: "ai", ...(response as unknown as Record<string, unknown>) });
+      messages.push(response);
+      const toolCalls = extractToolCalls(response);
+      console.log("[Agent] LLM response tool_calls count:", (response as { tool_calls?: unknown[] }).tool_calls?.length ?? 0);
+      console.log(
+        "[Agent] Tool calls requested:",
+        toolCalls.map((call) => ({
+          name: call.name,
+          args: call.args,
+        })),
+      );
+      if (toolCalls.length === 0) {
+        break;
+      }
+
+      const toolMessages: ToolMessage[] = [];
+      for (let index = 0; index < toolCalls.length; index += 1) {
+        const toolCall = toolCalls[index];
+        if (!toolCall) continue;
+        const tool = toolMap[toolCall.name];
+        console.log(
+          `[Agent] About to execute tool ${index + 1}/${toolCalls.length}:`,
+          toolCall.name,
+          toolCall.args ?? {},
+        );
+        console.log(`[Agent] Executing tool: ${toolCall.name}`, toolCall.args ?? {});
+
+        if (!tool) {
+          const missingToolPayload = { error: `Unknown tool: ${toolCall.name}` };
+          toolMessages.push(
+            new ToolMessage({
+              content: safeJsonStringify(missingToolPayload),
+              tool_call_id: toolCall.id ?? `${iteration}-${index}-${toolCall.name}`,
+            }),
+          );
+          continue;
+        }
+
+        try {
+          const toolTimeout = ["resizeObject", "moveObject"].includes(toolCall.name) ? 12_000 : 8_000;
+          const result = await Promise.race([
+            tool.invoke(toolCall.args ?? {}),
+            new Promise<never>((_, reject) => {
+              setTimeout(() => reject(new Error(`Tool ${toolCall.name} timed out`)), toolTimeout);
+            }),
+          ]);
+          console.log(`[Agent] Tool ${toolCall.name} result:`, result);
+          console.log("[Agent] Continuing to next tool...");
+          console.log(`[Agent] Tool ${toolCall.name} completed:`, result);
+
+          results.push({ call: toolCall, result });
+          const emittedObjects: BoardObject[] = [];
+          collectBoardObjects(result, emittedObjects);
+          if (["createStickyNote", "createShape", "createFrame"].includes(toolCall.name)) {
+            allCreatedObjects.push(...emittedObjects);
+          }
+
+          toolMessages.push(
+            new ToolMessage({
+              content: safeJsonStringify(result),
+              tool_call_id: toolCall.id ?? `${iteration}-${index}-${toolCall.name}`,
+            }),
+          );
+
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        } catch (error) {
+          console.error(`[Agent] Tool ${toolCall.name} failed:`, error);
+          toolMessages.push(
+            new ToolMessage({
+              content: safeJsonStringify({
+                error: error instanceof Error ? error.message : "Unknown tool execution error",
+              }),
+              tool_call_id: toolCall.id ?? `${iteration}-${index}-${toolCall.name}`,
+            }),
+          );
+        }
+      }
+
+      messages.push(...toolMessages);
     }
-
-    console.time(toolTimerLabel);
-    const results = await executeToolCallsOptimized({
-      toolCalls,
-      toolsByName,
-      startedAt,
-      command: params.command,
-    });
-    console.timeEnd(toolTimerLabel);
+    console.log("[Agent] Loop ended after", iterations, "iterations");
+    console.log("[Agent] Total objects created:", allCreatedObjects.length);
 
     const objectsAffectedSet = new Set<string>();
     const affectedObjectsFromTools: BoardObject[] = [];
@@ -1280,12 +2574,13 @@ export async function runAgentCommand(params: {
       collectBoardObjects(output.result, affectedObjectsFromTools);
     }
     mergeBoardCache(params.boardId, affectedObjectsFromTools);
+    mergeBoardCache(params.boardId, allCreatedObjects);
+
     const affectedIds = [...objectsAffectedSet];
     const boundingBox =
       computeBoundingBox(affectedObjectsFromTools) ?? (await getBoundingBoxForAffectedObjects(handlers, affectedIds));
-    const summary = buildSummaryFromToolResults(results);
-    const tokenSource = [{ type: "ai", ...(response as unknown as Record<string, unknown>) }];
-    const { inputTokens, outputTokens } = extractTokenUsage(tokenSource);
+    const summary = buildGroupedToolSummary(results);
+    const { inputTokens, outputTokens } = extractTokenUsage(aiMessages);
     const cost = calculateRunCost({
       model: modelName,
       inputTokens,
@@ -1331,6 +2626,25 @@ export async function runAgentCommand(params: {
       durationMs: Date.now() - startedAt,
       boundingBox,
     };
+    })();
+
+    const registryEntry = handlerRegistry.get(registryKey(params.boardId, params.userId));
+    const supabase = registryEntry?.supabase;
+    if (supabase) {
+      const snapshot = await loadPersistedBoardSnapshot(supabase, params.boardId);
+      await recordChange(
+        {
+          boardId: params.boardId,
+          userId: params.userId,
+          userName: params.userName || "User",
+          action: `AI: ${result.summary}`,
+          objectIds: result.objectsAffected,
+          boardSnapshot: snapshot,
+        },
+        supabase,
+      );
+    }
+    return result;
   } finally {
     console.timeEnd(totalTimerLabel);
   }

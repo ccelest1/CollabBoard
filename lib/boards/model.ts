@@ -24,6 +24,7 @@ export type BoardObject = {
   x2?: number;
   y2?: number;
   text?: string;
+  textColor?: string;
   color: string;
   createdAt: number;
   updatedAt: number;

@@ -1,4 +1,4 @@
-# CollabBoard Project
+# BEND Project
 
 ## Links
 - [Deployment Link]()

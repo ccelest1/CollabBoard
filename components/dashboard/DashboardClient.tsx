@@ -77,9 +77,9 @@ export function DashboardClient({ userId }: DashboardClientProps) {
     const onStorageChange = (event: StorageEvent) => {
       if (!event.key) return;
       if (
-        event.key.startsWith("collabboard.boards.v1:") ||
-        event.key === "collabboard.boardCatalog.v1" ||
-        event.key === "collabboard.boardSync.v1"
+        event.key.startsWith("bend.boards.v1:") ||
+        event.key === "bend.boardCatalog.v1" ||
+        event.key === "bend.boardSync.v1"
       ) {
         setVersion((current) => current + 1);
       }
@@ -96,12 +96,12 @@ export function DashboardClient({ userId }: DashboardClientProps) {
 
     window.addEventListener("storage", onStorageChange);
     window.addEventListener("focus", onWindowFocus);
-    window.addEventListener("collabboard:boards-updated", onBoardStoreUpdated);
+    window.addEventListener("bend:boards-updated", onBoardStoreUpdated);
     return () => {
       window.clearInterval(pollInterval);
       window.removeEventListener("storage", onStorageChange);
       window.removeEventListener("focus", onWindowFocus);
-      window.removeEventListener("collabboard:boards-updated", onBoardStoreUpdated);
+      window.removeEventListener("bend:boards-updated", onBoardStoreUpdated);
     };
   }, []);
 
@@ -284,10 +284,10 @@ export function DashboardClient({ userId }: DashboardClientProps) {
         <h1 className="text-center text-4xl font-semibold text-slate-900"> Dashboard</h1>
         <button
           type="button"
-          onClick={() => router.push("/boardverse")}
+          onClick={() => router.push("/bendverse")}
           className="absolute left-0 top-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
         >
-          Go to Boardverse
+          Go to BENDverse
         </button>
         <div className="absolute right-0 top-2 rounded-lg border border-slate-300 bg-white/90 p-3 shadow-sm">
           <div className="rounded-lg border border-slate-200 p-2">

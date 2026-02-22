@@ -79,6 +79,7 @@ export async function GET(request: Request) {
   if (!apiKey) {
     return NextResponse.json(formatCostSummary([]));
   }
+  const projectName = process.env.LANGSMITH_PROJECT ?? "bend";
 
   const { searchParams } = new URL(request.url);
   const daysRaw = Number(searchParams.get("days") ?? DEFAULT_DAYS);
@@ -87,7 +88,7 @@ export async function GET(request: Request) {
 
   const runs = await fetchRuns({
     apiKey,
-    projectName: "collabboard",
+    projectName,
     limit: MAX_LIMIT,
     startTimeIso,
   });

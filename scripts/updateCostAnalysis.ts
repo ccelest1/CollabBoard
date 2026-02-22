@@ -3,7 +3,7 @@ import { Client as LangSmithClient } from "langsmith";
 import { calculateRunCost, formatCostSummary, type RunCostData } from "../lib/ai/costTracker";
 
 const COST_FILE = "Cost_Analysis.md";
-const PROJECT_NAME = process.env.LANGSMITH_PROJECT ?? "collabboard";
+const PROJECT_NAME = process.env.LANGSMITH_PROJECT ?? "bend";
 
 function safeNumber(value: unknown) {
   const parsed = Number(value);

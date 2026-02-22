@@ -375,7 +375,7 @@ export function BoardWorkspace({ boardId, userLabel, userId }: BoardWorkspacePro
 
       <div className="absolute left-5 top-4 rounded-xl border border-slate-400 bg-white px-3 py-2 shadow-sm">
         <div className="flex items-center gap-4 text-sm">
-          <span className="font-medium">CollabBoard</span>
+          <span className="font-medium">BEND</span>
           <span className="text-slate-400">|</span>
           <span>Board Name</span>
           <button

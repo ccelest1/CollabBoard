@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { BoardObject } from "@/lib/boards/model";
 import { getBoardState, serializeBoardState, type SerializedBoardState } from "@/lib/ai/boardState";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { loadPersistedBoardSnapshot, savePersistedBoardSnapshot } from "@/lib/supabase/boardStateStore";
 
 type CreateStickyNoteInput = {
   text: string;
@@ -56,6 +57,10 @@ type ChangeColorInput = {
   color: string;
 };
 
+type DeleteObjectInput = {
+  objectId: string;
+};
+
 export function calculateCenteredGridPositions(params: {
   count: number;
   itemWidth: number;
@@ -92,6 +97,7 @@ export type BoardMutationHandlers = {
   resizeObject: (input: ResizeObjectInput) => Promise<BoardObject> | BoardObject;
   updateText: (input: UpdateTextInput) => Promise<BoardObject> | BoardObject;
   changeColor: (input: ChangeColorInput) => Promise<BoardObject> | BoardObject;
+  deleteObject?: (input: DeleteObjectInput) => Promise<{ deleted: boolean; objectId: string }> | { deleted: boolean; objectId: string };
   getBoardObjects: () => Promise<BoardObject[]> | BoardObject[];
 };
 
@@ -153,6 +159,10 @@ const updateTextSchema = z.object({
 const changeColorSchema = z.object({
   objectId: z.string().min(1),
   color: colorSchema,
+});
+
+const deleteObjectSchema = z.object({
+  objectId: z.string().min(1),
 });
 
 const getBoardStateSchema = z.object({});
@@ -260,6 +270,30 @@ export function createBoardTools(handlers: BoardMutationHandlers, context?: Tool
     },
   );
 
+  const deleteObject = tool(
+    async (input): Promise<{ deleted: boolean; objectId: string }> => {
+      if (handlers.deleteObject) {
+        return handlers.deleteObject(input);
+      }
+      if (!context?.supabase) {
+        throw new Error("deleteObject requires either handlers.deleteObject or a Supabase context");
+      }
+      const current = await loadPersistedBoardSnapshot(context.supabase, context.boardId);
+      const updated = {
+        ...current,
+        objects: (current.objects ?? []).filter((object) => object.id !== input.objectId),
+      };
+      await savePersistedBoardSnapshot(context.supabase, context.boardId, updated);
+      console.log("[delete] removed object:", input.objectId);
+      return { deleted: true, objectId: input.objectId };
+    },
+    {
+      name: "deleteObject",
+      description: "Delete an object from the board by its id. Call getBoardState first to find the id.",
+      schema: deleteObjectSchema,
+    },
+  );
+
   const getBoardStateTool = tool(
     async (): Promise<SerializedBoardState> => {
       if (context?.supabase) {
@@ -284,6 +318,7 @@ export function createBoardTools(handlers: BoardMutationHandlers, context?: Tool
     resizeObject,
     updateText,
     changeColor,
+    deleteObject,
     getBoardState: getBoardStateTool,
   };
 }
