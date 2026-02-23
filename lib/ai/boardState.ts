@@ -40,7 +40,6 @@ export function serializeBoardState(objects: BoardObject[]): SerializedBoardStat
 
 export async function getBoardState(supabase: SupabaseClient, boardId: string): Promise<SerializedBoardState> {
   const resolvedBoardId = boardId.trim();
-  console.log("[getBoardState] reading boardId:", resolvedBoardId);
   const snapshot = await loadPersistedBoardSnapshot(supabase, resolvedBoardId);
   const objects = snapshot.objects ?? [];
   const bySource = objects.reduce<Record<string, number>>((acc, object) => {
@@ -51,16 +50,7 @@ export async function getBoardState(supabase: SupabaseClient, boardId: string): 
     acc[source] = (acc[source] ?? 0) + 1;
     return acc;
   }, {});
-  console.log("[getBoardState] result count:", objects.length);
-  console.log("[getBoardState]", {
-    boardId: resolvedBoardId,
-    objectCount: objects.length,
-    objects,
-  });
-  console.log("[getBoardState] all objects:", {
-    total: objects.length,
-    bySource,
-  });
+  void bySource;
 
   if (objects.length === 0) {
     console.warn("[getBoardState] Board returned empty - possible write lag or save failure");

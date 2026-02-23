@@ -228,8 +228,6 @@ export function AIAgentPanel({
   const submitCommand = async (rawCommand: string, targetObjectId?: string) => {
     const command = sanitizeCommand(rawCommand);
     if (!command) return;
-    console.log("[sanitize] raw:", rawCommand);
-    console.log("[sanitize] cleaned:", command);
     setStatusMessage(null);
     setSubmittedCommand(command);
     setConversationHistory((current) => [

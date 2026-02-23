@@ -395,11 +395,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
   const aiFitTimeoutRef = useRef<number | null>(null);
 
   const userColor = colorFromUserId(userId || "user");
-  const debugLog = (...args: unknown[]) => {
-    if (process.env.NODE_ENV !== "production") {
-      console.log("[board-sync]", ...args);
-    }
-  };
+  const debugLog = (..._args: unknown[]) => {};
 
   const requestStateSnapshot = (reason: string) => {
     const channel = eventChannelRef.current;
@@ -1402,9 +1398,6 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
       .map((item) => ({ ...item }));
     if (selected.length === 0) return;
     setClipboard(selected);
-    if (process.env.NODE_ENV !== "production") {
-      console.log("📋 Copied", selected.length, "object(s)");
-    }
   };
 
   const handleDelete = () => {
@@ -1428,9 +1421,6 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
     removeLocalObjectsById(ids, true);
     for (const object of deletedObjects) {
       appendBoardHistory(`Deleted a ${objectTypeLabel(object.type)}`, [object.id]);
-    }
-    if (process.env.NODE_ENV !== "production") {
-      console.log("🗑️ Deleted", ids.length, "object(s)");
     }
   };
 
@@ -1494,9 +1484,6 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
     for (const object of cutObjects) {
       appendBoardHistory(`Deleted a ${objectTypeLabel(object.type)}`, [object.id]);
     }
-    if (process.env.NODE_ENV !== "production") {
-      console.log("✂️ Cut", ids.length, "object(s)");
-    }
   };
 
   const handlePaste = () => {
@@ -1537,9 +1524,6 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
       broadcastUpsert(item, false);
       appendBoardHistory(`Added a ${objectTypeLabel(item.type)}`, [item.id]);
     }
-    if (process.env.NODE_ENV !== "production") {
-      console.log("📌 Pasted", pasted.length, "object(s) at cursor position");
-    }
   };
 
   const handleDuplicate = () => {
@@ -1548,9 +1532,6 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
     const duplicatedObjects = duplicateObjects(ids, 20);
     for (const object of duplicatedObjects) {
       appendBoardHistory(`Added a ${objectTypeLabel(object.type)}`, [object.id]);
-    }
-    if (process.env.NODE_ENV !== "production") {
-      console.log("🔄 Duplicated", ids.length, "object(s)");
     }
   };
 
@@ -1755,9 +1736,6 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
   };
 
   const handleCanvasPointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
-    if (process.env.NODE_ENV !== "production") {
-      console.log("mousedown", event.target);
-    }
     setContextMenu(null);
     updateCanvasMousePos(event.clientX, event.clientY);
     maybeTrackCursor(event.clientX, event.clientY);
@@ -2095,9 +2073,7 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
       // Equivalent of discardActiveObject + render for our state-based canvas.
       clearSelectionState({ resetTool: true });
     }
-    if (process.env.NODE_ENV !== "production") {
-      console.log("mouseup", source, { activeObjectIds: selectedIdsRef.current });
-    }
+    void source;
   };
 
   const handleCanvasPointerUp = (event: PointerEvent<HTMLCanvasElement>) => {

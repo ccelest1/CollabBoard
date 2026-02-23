@@ -284,7 +284,6 @@ export function createBoardTools(handlers: BoardMutationHandlers, context?: Tool
         objects: (current.objects ?? []).filter((object) => object.id !== input.objectId),
       };
       await savePersistedBoardSnapshot(context.supabase, context.boardId, updated);
-      console.log("[delete] removed object:", input.objectId);
       return { deleted: true, objectId: input.objectId };
     },
     {
