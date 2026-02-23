@@ -283,11 +283,6 @@ async function executeSingleTool(params: {
     console.warn("[getBoardState called] command:", params.command);
   }
   const toolStartedAt = Date.now();
-  console.log("[AI timing] tool start", {
-    tool: params.call.name,
-    atMs: toolStartedAt,
-    sinceAgentStartMs: toolStartedAt - params.startedAt,
-  });
   const timeoutMs =
     params.timeoutMs ?? (["resizeObject", "moveObject"].includes(params.call.name) ? 12000 : 8000);
   try {
@@ -298,12 +293,7 @@ async function executeSingleTool(params: {
       }),
     ]);
     const toolEndedAt = Date.now();
-    console.log("[AI timing] tool end", {
-      tool: params.call.name,
-      atMs: toolEndedAt,
-      durationMs: toolEndedAt - toolStartedAt,
-      sinceAgentStartMs: toolEndedAt - params.startedAt,
-    });
+    void toolEndedAt;
     return { call: params.call, result };
   } catch (error) {
     const toolEndedAt = Date.now();
@@ -883,7 +873,6 @@ async function executeBulkCreate(params: {
         console.error(`[BulkCreate] Failed on item ${i + 1}:`, err);
       }
     }
-    console.log("[bulkCreate] finished, objectsCreated count:", objectsCreated.length);
     mergeBoardCache(params.boardId, objectsCreated);
     const labelMap: Record<string, string> = {
       sticky: "sticky notes",
@@ -1098,7 +1087,6 @@ function resolveDeleteTargets(
       const idSet = new Set(sessionCreatedIds);
       const sessionTargets = objects.filter((o) => idSet.has(o.id));
       if (sessionTargets.length > 0) {
-        console.log("[delete] resolved 'those/them' to session-created objects:", sessionCreatedIds);
         return sessionTargets;
       }
     }
@@ -1146,7 +1134,6 @@ export async function getFreshBoardState(params: {
     const persistedObjects = await params.handlers.getBoardObjects();
     const objects = persistedObjects.length > 0 ? persistedObjects : readBoardCache(params.boardId);
     mergeBoardCache(params.boardId, objects);
-    console.log(`[getFreshBoardState] attempt ${attempt + 1}: ${objects.length} objects`);
 
     if (objects.length > minExpected) return objects;
     if (attempt < MAX_RETRIES - 1) {
@@ -1219,18 +1206,10 @@ async function executeDelete(params: {
   toolsByName: Record<string, { invoke: (input: any, config?: any) => Promise<any> }>;
 }) {
   let objects = await getFreshBoardState({ boardId: params.boardId, handlers: params.handlers });
-  console.log("[delete] boardId received:", params.boardId);
-  console.log("[delete] getBoardState returned:", objects.length, "objects");
-  console.log("[delete] board state:", {
-    boardId: params.boardId,
-    totalObjects: objects.length,
-    types: objects.map((object) => ({ id: object.id, type: object.type, text: object.text })),
-  });
 
   if (objects.length === 0) {
     const cached = readBoardCache(params.boardId);
     if (cached.length > 0) {
-      console.log("[delete] Supabase empty, using in-memory cache");
       objects = cached;
     } else {
       await sleep(600);
@@ -1249,7 +1228,6 @@ async function executeDelete(params: {
   }
 
   const targets = resolveDeleteTargets(params.command, objects, params.sessionCreatedIds);
-  console.log("[delete] targets resolved:", targets.length, targets.map(getObjectLabel));
 
   if (targets.length === 0) {
     console.warn("[executeDelete] No targets found for command:", params.command);
@@ -1263,15 +1241,12 @@ async function executeDelete(params: {
   }
 
   const deletedIds: string[] = [];
-  console.log("[delete] about to delete:", targets.map((o) => o.id));
   await sleep(200);
   for (const object of targets) {
-    console.log("[delete] deleting:", object.id, object.type, object.text);
     await params.toolsByName.deleteObject.invoke({ objectId: object.id });
     deletedIds.push(object.id);
     await sleep(150);
   }
-  console.log("[delete] deleted ids:", deletedIds);
 
   const boardCache = boardObjectCache.get(params.boardId);
   if (boardCache) {
@@ -1535,7 +1510,10 @@ export async function runAgentCommand(params: {
   };
 
   // Get board state for planning context
-  const boardObjects = await handlers.getBoardObjects();
+  const boardObjects = await getFreshBoardState({
+    boardId: params.boardId,
+    handlers,
+  });
   mergeBoardCache(params.boardId, boardObjects);
   const boardStateStr = JSON.stringify(
     boardObjects.slice(0, 50).map((o) => ({
@@ -1560,12 +1538,6 @@ export async function runAgentCommand(params: {
     modelName,
     viewportCenter: params.viewportCenter,
   });
-
-  console.log("[planner] intent:", plan.intent);
-  console.log(
-    "[planner] steps:",
-    plan.steps.map((s) => ({ id: s.id, tool: s.tool, label: s.label })),
-  );
 
   // Execute plan steps in order
   const stepResults: Record<number, unknown> = {};
@@ -1632,8 +1604,7 @@ export async function runAgentCommand(params: {
       // Resolve $step_N references in args
       const withDefaults = fillDefaultArgs(step.tool, step.args, step.id);
       const resolvedArgs = patchMissingObjectRefs(step, resolveStepArgs(withDefaults, stepResults));
-
-      console.log(`[executor] step ${step.id}: ${step.tool}`, resolvedArgs);
+      void resolvedArgs;
 
       const tool = toolsByName[step.tool];
       if (!tool) {

@@ -209,6 +209,78 @@ export async function planCommand(params: {
     });
     return { ...plan, steps };
   };
+  const enforceDeleteCoverage = (plan: AgentPlan): AgentPlan => {
+    const lowered = params.command.toLowerCase();
+    if (!/\bdelete\b/.test(lowered)) return plan;
+
+    const creationTools = new Set(["createStickyNote", "createShape", "createFrame", "createConnector"]);
+    const createdStepIds = plan.steps.filter((step) => creationTools.has(step.tool)).map((step) => step.id);
+    const deleteObjectRefs = new Set(
+      plan.steps
+        .filter((step) => step.tool === "deleteObject")
+        .map((step) => (typeof step.args.objectId === "string" ? step.args.objectId : null))
+        .filter((value): value is string => Boolean(value)),
+    );
+
+    let nextId = plan.steps.reduce((max, step) => Math.max(max, step.id), -1) + 1;
+    const appended: PlanStep[] = [];
+
+    const isPronounDelete = /\b(it|them|those|that)\b/.test(lowered);
+    if (isPronounDelete && createdStepIds.length > 0) {
+      for (const createdId of createdStepIds) {
+        const ref = `$step_${createdId}.id`;
+        if (deleteObjectRefs.has(ref)) continue;
+        appended.push({
+          id: nextId++,
+          tool: "deleteObject",
+          args: { objectId: ref },
+          dependsOn: [createdId],
+          label: `Delete object from step ${createdId}`,
+        });
+      }
+    }
+
+    const isBulkDelete = /\b(all|every|each)\b/.test(lowered);
+    if (isBulkDelete) {
+      const typeMatchers: Array<{ keywords: RegExp; types: string[] }> = [
+        { keywords: /\bsticky|stickies\b/, types: ["sticky", "stickyNote"] },
+        { keywords: /\brectangle|rectangles\b/, types: ["rectangle"] },
+        { keywords: /\bcircle|circles\b/, types: ["circle"] },
+        { keywords: /\bframe|frames\b/, types: ["frame"] },
+        { keywords: /\bconnector|connectors|arrow|arrows|line|lines\b/, types: ["connector", "line"] },
+        { keywords: /\btext|textbox|textboxes\b/, types: ["text"] },
+      ];
+      const boardObjects: Array<{ id?: unknown; type?: unknown }> = (() => {
+        try {
+          const parsed = JSON.parse(params.boardState);
+          return Array.isArray(parsed) ? parsed : [];
+        } catch {
+          return [];
+        }
+      })();
+      const matchedTypes = typeMatchers.find((entry) => entry.keywords.test(lowered))?.types ?? [];
+      if (matchedTypes.length > 0) {
+        const targetIds = boardObjects
+          .filter((obj) => typeof obj.id === "string" && matchedTypes.includes(String(obj.type)))
+          .map((obj) => String(obj.id));
+        const literalDeletes = new Set(
+          [...deleteObjectRefs].filter((value) => !/^\$step_\d+\.id$/.test(value)),
+        );
+        for (const id of targetIds) {
+          if (literalDeletes.has(id)) continue;
+          appended.push({
+            id: nextId++,
+            tool: "deleteObject",
+            args: { objectId: id },
+            dependsOn: [],
+            label: `Delete ${id}`,
+          });
+        }
+      }
+    }
+
+    return appended.length > 0 ? { ...plan, steps: [...plan.steps, ...appended] } : plan;
+  };
 
   const systemPrompt = PLANNER_SYSTEM_PROMPT
     .replace("{{BOARD_STATE}}", params.boardState)
@@ -240,9 +312,9 @@ export async function planCommand(params: {
     if (!retryResult.success || retryResult.data.steps.length === 0) {
       throw new Error("Planning failed");
     }
-    return enforceSingularColorChange(anchorPlanToViewport(retryResult.data));
+    return enforceDeleteCoverage(enforceSingularColorChange(anchorPlanToViewport(retryResult.data)));
   }
-  return enforceSingularColorChange(anchorPlanToViewport(result.data));
+  return enforceDeleteCoverage(enforceSingularColorChange(anchorPlanToViewport(result.data)));
 }
 
 export function resolveStepArgs(

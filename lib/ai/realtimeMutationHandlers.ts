@@ -80,11 +80,6 @@ async function verifyPersistedObjectAndBroadcast(
       boardId,
       objectId: object.id,
     });
-  } else {
-    console.log("[persistAndBroadcastUpsert] Verified object persisted", {
-      boardId,
-      objectId: object.id,
-    });
   }
   await broadcastEvent(supabase, boardId, {
     type: "upsert_object",

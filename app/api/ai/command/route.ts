@@ -75,8 +75,6 @@ function sanitizeSummary(input: string) {
 }
 
 export async function POST(request: Request) {
-  const requestStartedAt = Date.now();
-  console.log("[AI timing] request received", { atMs: requestStartedAt });
   let payload: AiCommandRequest;
   try {
     payload = (await request.json()) as AiCommandRequest;
@@ -124,11 +122,6 @@ export async function POST(request: Request) {
       }),
     });
 
-    const runStartedAt = Date.now();
-    console.log("[AI timing] runAgentCommand called", {
-      atMs: runStartedAt,
-      sinceRequestMs: runStartedAt - requestStartedAt,
-    });
     const result = await runAgentCommand({
       command,
       boardId,
@@ -138,34 +131,17 @@ export async function POST(request: Request) {
       targetObjectId,
       signal: request.signal,
     });
-    const runFinishedAt = Date.now();
-    console.log("[AI timing] runAgentCommand returned", {
-      atMs: runFinishedAt,
-      runDurationMs: runFinishedAt - runStartedAt,
-      sinceRequestMs: runFinishedAt - requestStartedAt,
-    });
-
     if (result.durationMs > 2000) {
       console.warn("[AI command latency warning]", { command, durationMs: result.durationMs });
     }
-    console.log("[Route] Agent completed:", {
-      objectsCreated: (result as { objectsCreated?: unknown[] }).objectsCreated?.length,
-      durationMs: result.durationMs,
-    });
 
-    const response = NextResponse.json({
+    return NextResponse.json({
       summary: sanitizeSummary(result.summary),
       objectsAffected: result.objectsAffected,
       objectIds: result.objectsAffected,
       durationMs: result.durationMs,
       boundingBox: result.boundingBox ?? null,
     });
-    const responseAt = Date.now();
-    console.log("[AI timing] response sent", {
-      atMs: responseAt,
-      totalDurationMs: responseAt - requestStartedAt,
-    });
-    return response;
   } catch (error) {
     void error;
     return NextResponse.json({
