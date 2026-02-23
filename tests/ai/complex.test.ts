@@ -39,4 +39,26 @@ describe("Complex Command Variations", () => {
     const stickies = store.getObjects().filter((o: any) => o.type === "sticky" || o.type === "stickyNote");
     expect(stickies.length).toBeGreaterThanOrEqual(5);
   }, 60000);
+
+  it("Create a SWOT analysis and then delete it", async () => {
+    const store = setupBoardMocks();
+    await runAgentCommand({
+      command: "Create a SWOT analysis and then delete it",
+      boardId: TEST_BOARD_ID,
+      userId: TEST_USER_ID,
+    });
+    const objects = store.getObjects();
+    expect(objects).toHaveLength(0);
+  }, 30000);
+
+  it("Create a journey map with 5 stages and then delete it", async () => {
+    const store = setupBoardMocks();
+    await runAgentCommand({
+      command: "Create a journey map with 5 stages and then delete it",
+      boardId: TEST_BOARD_ID,
+      userId: TEST_USER_ID,
+    });
+    const objects = store.getObjects();
+    expect(objects).toHaveLength(0);
+  }, 30000);
 });

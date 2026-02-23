@@ -9,6 +9,7 @@ type AiCommandRequest = {
   userId?: string;
   userName?: string;
   targetObjectId?: string;
+  viewportCenter?: { x: number; y: number };
 };
 
 const WINDOW_MS = 60_000;
@@ -87,6 +88,7 @@ export async function POST(request: Request) {
   const boardId = payload.boardId?.trim();
   const userId = payload.userId?.trim();
   const targetObjectId = payload.targetObjectId?.trim();
+  const viewportCenter = (payload.viewportCenter as { x: number; y: number } | undefined) ?? { x: 0, y: 0 };
 
   if (!isNonEmptyString(command) || !isNonEmptyString(boardId) || !isNonEmptyString(userId)) {
     return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
@@ -127,20 +129,15 @@ export async function POST(request: Request) {
       atMs: runStartedAt,
       sinceRequestMs: runStartedAt - requestStartedAt,
     });
-    const timeoutMs = getTimeoutMs(command);
-    const result = await Promise.race([
-      runAgentCommand({
-        command,
-        boardId,
-        userId,
-        userName,
-        targetObjectId,
-        signal: request.signal,
-      }),
-      new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error(`timeout:${timeoutMs}`)), timeoutMs);
-      }),
-    ]);
+    const result = await runAgentCommand({
+      command,
+      boardId,
+      userId,
+      viewportCenter,
+      userName,
+      targetObjectId,
+      signal: request.signal,
+    });
     const runFinishedAt = Date.now();
     console.log("[AI timing] runAgentCommand returned", {
       atMs: runFinishedAt,
@@ -161,6 +158,7 @@ export async function POST(request: Request) {
       objectsAffected: result.objectsAffected,
       objectIds: result.objectsAffected,
       durationMs: result.durationMs,
+      boundingBox: result.boundingBox ?? null,
     });
     const responseAt = Date.now();
     console.log("[AI timing] response sent", {
@@ -169,19 +167,12 @@ export async function POST(request: Request) {
     });
     return response;
   } catch (error) {
-    const message = error instanceof Error ? error.message : "";
-    if (request.signal.aborted || message.includes("aborted") || message.includes("AbortError")) {
-      return NextResponse.json({ error: "Request aborted" }, { status: 499 });
-    }
-    if (message.startsWith("timeout:")) {
-      return NextResponse.json(
-        {
-          error:
-            'Command timed out. For complex commands like color changes across multiple objects, try: "Change all sticky notes to green" and wait up to 30 seconds.',
-        },
-        { status: 504 },
-      );
-    }
-    return NextResponse.json({ error: "AI command failed" }, { status: 500 });
+    void error;
+    return NextResponse.json({
+      summary: "I couldn't process that command — please try rephrasing",
+      objectsAffected: [],
+      objectIds: [],
+      durationMs: 0,
+    }, { status: 200 });
   }
 }

@@ -2,7 +2,9 @@
 - Run `npm run costs:update` after dev sessions/hit milestones to update with real numbers from LS
 - Killing all local3000
     * `kill -9 $(lsof -t -i:3000)`
-    
+- output to .txt file
+    * `npm run test:ai 2>&1 | tee ~/Desktop/test-output.txt`
+
 1. `npx create-next-app@latest . --typescript --tailwind`
     - initialize npm project with typescript and tailwind
 2. `npm install fabric @supabase/supabase-js @supabase/ssr`

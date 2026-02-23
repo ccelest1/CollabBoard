@@ -6,6 +6,10 @@ import { executeFakeAgentCommand } from "@/tests/ai/helpers/mockRuntime";
 vi.mock("@langchain/openai", () => ({
   ChatOpenAI: class {
     constructor(public options: Record<string, unknown>) {}
+    async invoke() {
+      const plan = {"intent":"mock","steps":[{"id":0,"tool":"createStickyNote","args":{"text":"Test","x":0,"y":0,"color":"#fde68a"},"dependsOn":[],"label":"create"}]};
+      return { content: JSON.stringify(plan) };
+    }
   },
 }));
 

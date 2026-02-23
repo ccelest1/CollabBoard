@@ -11,6 +11,7 @@ export function animateCameraToBox(params: {
   durationMs?: number;
   onComplete?: () => void;
 }): () => void {
+  if (!params.box || params.box.width < 1 || params.box.height < 1) return () => {};
   cancelCurrentAnimation();
 
   const { canvas, box, onComplete } = params;
