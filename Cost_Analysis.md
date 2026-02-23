@@ -2,15 +2,11 @@
 
 ## Data Sources and Scope
 
-- LangSmith run data pulled from the currently configured project in `.env.local`:
-  - `LANGSMITH_PROJECT="BEND"` (not `bend`)
-  - Result: 101 runs available via LangSmith SDK iteration (max available in this workspace/account context)
 - Codebase inspection:
   - `lib/ai/agent.ts` (model routing + system prompt)
   - `package.json` + `.env.local` (provider and API config)
   - Supabase usage in `lib/supabase/*`, `app/*`, and board components
 
-> Note: Requested `bend` run query could not be used directly because the active LangSmith project in `.env.local` is `BEND`. All "real" run/token numbers below come from that active project.
 
 ## Development and Testing Costs
 
