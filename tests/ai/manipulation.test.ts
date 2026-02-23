@@ -65,4 +65,30 @@ describe("Manipulation Commands", () => {
     expect(objects).toHaveLength(1);
     expect(objects[0]?.color).toMatch(/000000|black/i);
   }, 15000);
+
+  it("Create 5 pink sticky notes and make them black", async () => {
+    const store = setupBoardMocks();
+    await runAgentCommand({
+      command: "Create 5 pink sticky notes and make them black",
+      boardId: TEST_BOARD_ID,
+      userId: TEST_USER_ID,
+    });
+    const objects = store.getObjects();
+    expect(objects.length).toBeGreaterThanOrEqual(5);
+    const blacks = objects.filter((o: any) =>
+      /000000|0f172a|black/i.test(String(o.color ?? "")),
+    );
+    expect(blacks.length).toBeGreaterThanOrEqual(5);
+  }, 30000);
+
+  it("Create 10 rectangles and then delete them", async () => {
+    const store = setupBoardMocks();
+    await runAgentCommand({
+      command: "Create 10 rectangles and then delete them",
+      boardId: TEST_BOARD_ID,
+      userId: TEST_USER_ID,
+    });
+    const objects = store.getObjects();
+    expect(objects).toHaveLength(0);
+  }, 30000);
 });

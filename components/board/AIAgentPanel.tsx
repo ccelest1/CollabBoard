@@ -19,6 +19,7 @@ type AIAgentPanelProps = {
   onAIActionStart?: () => void;
   onAIActionComplete?: (boundingBox: { x: number; y: number; width: number; height: number } | null) => void;
   boardObjects: Array<{ id: string; type: string }>;
+  viewportCenter?: { x: number; y: number };
 };
 
 type BoardBoundsResponse = {
@@ -80,6 +81,11 @@ function GhostButton({ label, onClick }: { label: string; onClick: () => void })
 function TypingMessage({ text, onDone }: { text: string; onDone?: () => void }) {
   const [displayed, setDisplayed] = useState("");
   const [done, setDone] = useState(false);
+  const onDoneRef = useRef(onDone);
+
+  useEffect(() => {
+    onDoneRef.current = onDone;
+  }, [onDone]);
 
   useEffect(() => {
     let i = 0;
@@ -91,11 +97,11 @@ function TypingMessage({ text, onDone }: { text: string; onDone?: () => void }) 
       if (i >= text.length) {
         window.clearInterval(interval);
         setDone(true);
-        onDone?.();
+        onDoneRef.current?.();
       }
     }, 18);
     return () => window.clearInterval(interval);
-  }, [text, onDone]);
+  }, [text]);
 
   return (
     <span>
@@ -125,6 +131,7 @@ export function AIAgentPanel({
   onCommandSuccess,
   onAIActionStart,
   onAIActionComplete,
+  viewportCenter,
   boardObjects,
 }: AIAgentPanelProps) {
   const [internalIsOpen, setInternalIsOpen] = useState(false);
@@ -134,12 +141,14 @@ export function AIAgentPanel({
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [submittedCommand, setSubmittedCommand] = useState("");
   const [conversationHistory, setConversationHistory] = useState<ConversationMessage[]>([]);
+  const [isWaiting, setIsWaiting] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const chatContainerRef = useRef<HTMLDivElement | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const statusTimeoutRef = useRef<number | null>(null);
   const queueRef = useRef<QueuedCommand[]>([]);
   const isProcessingRef = useRef(false);
+  const isAiTypingRef = useRef(false);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const isOpen = isOpenProp ?? internalIsOpen;
   const setIsOpen = (open: boolean) => {
@@ -232,7 +241,12 @@ export function AIAgentPanel({
         timestamp: new Date(),
       },
     ]);
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
     abortControllerRef.current = new AbortController();
+    setIsWaiting(true);
     onAIActionStart?.();
 
     try {
@@ -240,18 +254,20 @@ export function AIAgentPanel({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: abortControllerRef.current.signal,
-        body: JSON.stringify({ command, boardId, userId, targetObjectId }),
+        body: JSON.stringify({ command, boardId, userId, targetObjectId, viewportCenter: viewportCenter ?? { x: 0, y: 0 } }),
       });
       const payload = (await response.json()) as {
         summary?: string;
         objectsAffected?: string[];
         objectIds?: string[];
+        boundingBox?: { x: number; y: number; width: number; height: number } | null;
         error?: string;
       };
       if (!response.ok) {
         throw new Error(payload.error || "AI command failed");
       }
       const objectIds = payload.objectIds ?? payload.objectsAffected ?? [];
+      setIsWaiting(false);
       const summary = payload.summary?.trim() || "Done";
       setConversationHistory((current) => [
         ...current,
@@ -263,17 +279,10 @@ export function AIAgentPanel({
           animationDone: false,
         },
       ]);
-      try {
-        const boundsResponse = await fetch(
-          `/api/ai/board-bounds?boardId=${encodeURIComponent(boardId)}&objectIds=${encodeURIComponent(objectIds.join(","))}`,
-        );
-        const boundsPayload = (await boundsResponse.json()) as BoardBoundsResponse;
-        onCommandSuccess?.(boundsPayload.bounds ?? null);
-        onAIActionComplete?.(boundsPayload.bounds ?? null);
-      } catch {
-        onCommandSuccess?.(null);
-        onAIActionComplete?.(null);
-      }
+      isAiTypingRef.current = true;
+      const bounds = payload.boundingBox ?? null;
+      onCommandSuccess?.(bounds);
+      onAIActionComplete?.(bounds);
       abortControllerRef.current = null;
     } catch (caught) {
       const responseError =
@@ -284,6 +293,7 @@ export function AIAgentPanel({
       const aborted =
         (caught instanceof DOMException && caught.name === "AbortError") ||
         (caught instanceof Error && caught.message.toLowerCase().includes("abort"));
+      setIsWaiting(false);
       showStatusMessage(aborted ? "Request stopped" : responseError);
       onAIActionComplete?.(null);
       abortControllerRef.current = null;
@@ -297,6 +307,7 @@ export function AIAgentPanel({
 
   const processQueue = async () => {
     if (isProcessingRef.current) return;
+    if (isAiTypingRef.current) return;
     const next = queueRef.current[0];
     if (!next) return;
 
@@ -309,7 +320,7 @@ export function AIAgentPanel({
       setIsExecuting(false);
       setSubmittedCommand("");
       isProcessingRef.current = false;
-      if (queueRef.current.length > 0) {
+      if (queueRef.current.length > 0 && !isAiTypingRef.current) {
         window.setTimeout(() => {
           void processQueue();
         }, 100);
@@ -351,6 +362,10 @@ export function AIAgentPanel({
     setConversationHistory((current) =>
       current.map((entry) => (entry.id === id ? { ...entry, animationDone: true } : entry)),
     );
+    isAiTypingRef.current = false;
+    if (!isProcessingRef.current && queueRef.current.length > 0) {
+      void processQueue();
+    }
   };
 
   return (
@@ -446,6 +461,17 @@ export function AIAgentPanel({
                     </div>
                   </div>
                 )})}
+                {isWaiting && (
+                  <div className="mr-auto max-w-[90%]">
+                    <div className="rounded-2xl bg-[#F3F4F6] px-3 py-2" style={{ width: "fit-content" }}>
+                      <div className="flex gap-1 items-center h-4">
+                        <span className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: "0ms" }} />
+                        <span className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: "150ms" }} />
+                        <span className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: "300ms" }} />
+                      </div>
+                    </div>
+                  </div>
+                )}
                 <div ref={chatEndRef} style={{ height: 0, flexShrink: 0 }} />
               </div>
               {statusMessage ? (
@@ -475,7 +501,6 @@ export function AIAgentPanel({
               value={inputValue}
               onChange={(event) => setInputValue(event.target.value)}
               onKeyDown={handleInputKeyDown}
-              disabled={isExecuting}
               placeholder="Ask AI to do something..."
               style={{
                 width: "100%",
@@ -486,7 +511,7 @@ export function AIAgentPanel({
                 fontSize: 13,
                 fontFamily: "inherit",
                 outline: "none",
-                background: isExecuting ? "#F9FAFB" : "white",
+                background: "white",
               }}
             />
             <p className="mt-1 text-right text-[10px] text-slate-400">ⓘ Press Enter to Submit Request</p>

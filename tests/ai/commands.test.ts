@@ -3,19 +3,6 @@ import type { BoardObject } from "@/lib/boards/model";
 import { createInMemoryHandlers } from "@/tests/ai/helpers/mockRuntime";
 import { registerBoardMutationHandlers, runAgentCommand } from "@/lib/ai/agent";
 
-vi.mock("@langchain/openai", () => ({
-  ChatOpenAI: class {
-    constructor(public options: Record<string, unknown>) {}
-    bindTools() {
-      return {
-        invoke: async () => ({ tool_calls: [] }),
-      };
-    }
-    async invoke() {
-      return { tool_calls: [] };
-    }
-  },
-}));
 
 vi.mock("langsmith", () => ({
   Client: class {},
