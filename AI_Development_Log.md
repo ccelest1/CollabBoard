@@ -6,10 +6,10 @@
     * Cursor
 
 ## Effective Prompts
-- MCPs used (if any), what they enabled
+- NO MCPs used
 
 ## Code Analysis
-- Rough % of Ai generated v hand
+- 95% ai code generation vs 5% by hand
 
 ## Strengths and Limitations
 - Where AI excelled, where it struggled
