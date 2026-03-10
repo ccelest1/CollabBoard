@@ -1,6 +1,8 @@
 import { redirect } from "next/navigation";
+import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { AuthForm } from "@/components/AuthForm";
+import { readGuestSession } from "@/lib/auth/guestSession";
 
 function safeRedirectPath(candidate: string | null | undefined, fallback: string) {
   if (!candidate) return fallback;
@@ -10,12 +12,14 @@ function safeRedirectPath(candidate: string | null | undefined, fallback: string
 }
 
 export default async function LoginPage({ searchParams }: { searchParams?: { redirect?: string } }) {
+  const cookieStore = await cookies();
+  const guestSession = readGuestSession(cookieStore);
   const supabase = await createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
 
-  if (user) {
+  if (user || guestSession) {
     redirect(safeRedirectPath(searchParams?.redirect, "/dashboard"));
   }
 

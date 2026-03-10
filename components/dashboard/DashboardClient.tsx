@@ -17,13 +17,14 @@ import { savePersistedBoardSnapshot } from "@/lib/supabase/boardStateStore";
 type ViewMode = "grid" | "table";
 type DashboardClientProps = {
   userId: string;
+  isGuest?: boolean;
 };
 
 function formatDate(timestamp: number) {
   return new Date(timestamp).toLocaleDateString();
 }
 
-export function DashboardClient({ userId }: DashboardClientProps) {
+export function DashboardClient({ userId, isGuest = false }: DashboardClientProps) {
   const router = useRouter();
   const supabase = useMemo(() => createClient(), []);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
@@ -39,6 +40,7 @@ export function DashboardClient({ userId }: DashboardClientProps) {
   const userScope = userId;
 
   useEffect(() => {
+    if (isGuest) return;
     let active = true;
 
     const verifySession = async () => {
@@ -65,7 +67,7 @@ export function DashboardClient({ userId }: DashboardClientProps) {
       active = false;
       subscription.unsubscribe();
     };
-  }, [router, supabase]);
+  }, [isGuest, router, supabase]);
 
   useEffect(() => {
     if (!userScope) return;

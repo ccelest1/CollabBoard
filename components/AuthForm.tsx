@@ -1,6 +1,7 @@
 "use client";
 
 import { createClient } from "@/lib/supabase/client";
+import { GUEST_ID_COOKIE, GUEST_NAME_COOKIE } from "@/lib/auth/guestSession";
 import { useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
@@ -10,6 +11,7 @@ export function AuthForm() {
   const searchParams = useSearchParams();
   const [mode, setMode] = useState<Mode>("sign-in");
   const [username, setUsername] = useState("");
+  const [guestName, setGuestName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
@@ -47,6 +49,8 @@ export function AuthForm() {
     setMessage("");
 
     const supabase = createClient();
+    document.cookie = `${GUEST_ID_COOKIE}=; path=/; max-age=0; SameSite=Lax`;
+    document.cookie = `${GUEST_NAME_COOKIE}=; path=/; max-age=0; SameSite=Lax`;
 
     if (mode === "sign-up") {
       const trimmedUsername = username.trim();
@@ -94,6 +98,29 @@ export function AuthForm() {
 
     setStatus("success");
     setMessage("Signing you in...");
+    navigateNow(redirectPath);
+  }
+
+  function handleGuestSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    const trimmed = guestName.trim();
+    if (trimmed.length < 2) {
+      setStatus("error");
+      setMessage("Please enter a guest name (at least 2 characters).");
+      return;
+    }
+    const sanitized = trimmed.slice(0, 24);
+    const guestId =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? `guest-${crypto.randomUUID()}`
+        : `guest-${Date.now()}`;
+    const encodedName = encodeURIComponent(sanitized);
+    const encodedId = encodeURIComponent(guestId);
+    const oneDay = 60 * 60 * 24;
+    document.cookie = `${GUEST_NAME_COOKIE}=${encodedName}; path=/; max-age=${oneDay}; SameSite=Lax`;
+    document.cookie = `${GUEST_ID_COOKIE}=${encodedId}; path=/; max-age=${oneDay}; SameSite=Lax`;
+    setStatus("success");
+    setMessage(`Entering as ${sanitized}...`);
     navigateNow(redirectPath);
   }
 
@@ -246,6 +273,28 @@ export function AuthForm() {
       >
         {mode === "sign-in" ? "Sign in with Google" : "Sign up with Google"}
       </button>
+      <form onSubmit={handleGuestSubmit} className="space-y-2 rounded-md border border-slate-200 bg-slate-50 p-3">
+        <p className="text-xs font-medium text-slate-700">Continue as guest</p>
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={guestName}
+            onChange={(event) => setGuestName(event.target.value)}
+            minLength={2}
+            maxLength={24}
+            placeholder="Enter a display name"
+            className={`${inputClass} mt-0`}
+            disabled={isLoading}
+          />
+          <button
+            type="submit"
+            disabled={isLoading}
+            className="shrink-0 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+          >
+            Continue
+          </button>
+        </div>
+      </form>
       <form onSubmit={handlePasswordSubmit} className="space-y-4">
         {mode === "sign-up" && (
           <div>

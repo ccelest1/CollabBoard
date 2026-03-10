@@ -79,7 +79,7 @@ export async function GET(request: Request) {
   if (!apiKey) {
     return NextResponse.json(formatCostSummary([]));
   }
-  const projectName = process.env.LANGSMITH_PROJECT ?? "bend";
+  const projectName = process.env.LANGSMITH_PROJECT ?? "BEND";
 
   const { searchParams } = new URL(request.url);
   const daysRaw = Number(searchParams.get("days") ?? DEFAULT_DAYS);

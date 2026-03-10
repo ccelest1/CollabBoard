@@ -1,9 +1,19 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { Client as LangSmithClient } from "langsmith";
+import dotenv from "dotenv";
 import { calculateRunCost, formatCostSummary, type RunCostData } from "../lib/ai/costTracker";
 
+dotenv.config({ path: ".env.local" });
+dotenv.config();
+
 const COST_FILE = "Cost_Analysis.md";
-const PROJECT_NAME = process.env.LANGSMITH_PROJECT ?? "bend";
+const PROJECT_NAME = process.env.LANGSMITH_PROJECT ?? "BEND";
+const LANGSMITH_API_KEY =
+  process.env.LANGSMITH_API_KEY?.trim().replace(/^['"]|['"]$/g, "") ||
+  process.env.LANGCHAIN_API_KEY?.trim().replace(/^['"]|['"]$/g, "");
+const LANGSMITH_ENDPOINT =
+  process.env.LANGSMITH_ENDPOINT?.trim().replace(/^['"]|['"]$/g, "") ||
+  process.env.LANGCHAIN_ENDPOINT?.trim().replace(/^['"]|['"]$/g, "");
 
 function safeNumber(value: unknown) {
   const parsed = Number(value);
@@ -54,7 +64,13 @@ function extractOutputTokens(run: Record<string, unknown>) {
 }
 
 async function loadRuns(days = 30) {
-  const client = new LangSmithClient();
+  if (!LANGSMITH_API_KEY) {
+    throw new Error("Missing LangSmith API key. Set LANGSMITH_API_KEY (or LANGCHAIN_API_KEY).");
+  }
+  const client = new LangSmithClient({
+    apiKey: LANGSMITH_API_KEY,
+    apiUrl: LANGSMITH_ENDPOINT || undefined,
+  });
   const startTime = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   const runs: Record<string, unknown>[] = [];
   const iterator = client.listRuns({
