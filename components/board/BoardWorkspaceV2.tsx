@@ -39,6 +39,7 @@ type BoardWorkspaceProps = {
   boardId: string;
   userLabel: string;
   userId: string;
+  isGuest?: boolean;
 };
 
 type Viewport = {
@@ -313,7 +314,7 @@ function clampTextFontSize(value: number) {
   return Math.max(MIN_TEXT_FONT_SIZE, Math.min(MAX_TEXT_FONT_SIZE, value));
 }
 
-export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceProps) {
+export function BoardWorkspaceV2({ boardId, userLabel, userId, isGuest = false }: BoardWorkspaceProps) {
   const router = useRouter();
   const supabase = useMemo(() => createClient(), []);
   const normalizedBoardId = useMemo(() => sanitizeBoardId(boardId), [boardId]);
@@ -2286,8 +2287,12 @@ export function BoardWorkspaceV2({ boardId, userLabel, userId }: BoardWorkspaceP
 
   const handleSignOut = async () => {
     setSigningOut(true);
-    const client = createClient();
-    await client.auth.signOut();
+    if (!isGuest) {
+      const client = createClient();
+      await client.auth.signOut();
+    }
+    document.cookie = "bend_guest_name=; path=/; max-age=0; SameSite=Lax";
+    document.cookie = "bend_guest_id=; path=/; max-age=0; SameSite=Lax";
     window.location.replace("/login");
     setSigningOut(false);
   };

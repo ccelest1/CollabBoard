@@ -1,5 +1,6 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
+import { readGuestSession } from "@/lib/auth/guestSession";
 
 function safeRedirectPath(candidate: string | null | undefined, fallback: string) {
   if (!candidate) return fallback;
@@ -34,11 +35,12 @@ export async function updateSession(request: NextRequest) {
 
   const pathname = request.nextUrl.pathname;
   const isProtectedRoute = pathname.startsWith("/dashboard") || pathname.startsWith("/board");
+  const guestSession = readGuestSession(request.cookies);
   const {
     data: { user },
   } = await supabase.auth.getUser();
 
-  if (!user && isProtectedRoute) {
+  if (!user && !guestSession && isProtectedRoute) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     const intended = `${request.nextUrl.pathname}${request.nextUrl.search}`;
@@ -46,7 +48,7 @@ export async function updateSession(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  if (user && pathname === "/login") {
+  if ((user || guestSession) && pathname === "/login") {
     const redirectTarget = safeRedirectPath(request.nextUrl.searchParams.get("redirect"), "/dashboard");
     return NextResponse.redirect(new URL(redirectTarget, request.url));
   }

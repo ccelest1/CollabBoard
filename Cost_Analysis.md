@@ -17,34 +17,34 @@
 
 ### 2) LangSmith Run/Token Totals (from active project)
 
-- Total runs: **136** (real)
-- Total input tokens: **39,180** (real)
-- Total output tokens: **4,524** (real)
-- Failed runs: **1** (real)
+- Total runs: **5,314** (real)
+- Total input tokens: **1,377,613** (real)
+- Total output tokens: **236,952** (real)
+- Failed runs: **66** (real)
 
 ### 3) Breakdown by Model
 
 - `gpt-4o-mini`
-  - Runs: **90** (real)
-  - Input tokens: **29,868** (real)
-  - Output tokens: **1,004** (real)
+  - Runs: **1,085** (real)
+  - Input tokens: **796,673** (real)
+  - Output tokens: **109,513** (real)
 - `gpt-4o`
-  - Runs: **46** (real)
-  - Input tokens: **9,312** (real)
-  - Output tokens: **3,520** (real)
+  - Runs: **907** (real)
+  - Input tokens: **580,940** (real)
+  - Output tokens: **127,439** (real)
 
 ### 4) Development/Test LLM Cost (using provided pricing)
 
 - `gpt-4o-mini`: $0.15 / 1M input, $0.60 / 1M output
 - `gpt-4o`: $2.50 / 1M input, $10.00 / 1M output
 
-- **Total observed LLM cost (dev/test runs): $0.063563** (real)
-- Failed-run waste cost: **~$0.000467** (estimated)
+- **Total observed LLM cost (dev/test runs): $2.911949** (real)
+- Failed-run waste cost: **~$0.036166** (estimated)
 
 ### 5) Number of API Calls Made
 
-- LangSmith runs tracked: **136** (real)
-- Approximate LLM call count proxy: **136** (estimated)
+- LangSmith runs tracked: **5,314** (real)
+- Approximate LLM call count proxy: **5,314** (estimated)
 
 ### 6) Other AI-Related Costs
 
